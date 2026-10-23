@@ -1,42 +1,30 @@
-todo.txt
-.codex
-
+# Local credentials and environment
 .env
-.venv/
-venv/
-.pytest_cache/
-.mypy_cache/
+.env.*
+!.env.example
 
-# CausalDB Data and Logs for tests and dev environment
-velarix.data/
-*.vlog
-*.mem
-*.data
-*.bin
+# Runtime artifacts
+.paradox/
+coverage.txt
+coverage.out
 
+# Build output
 bin/
+dist/
 *.exe
 *.test
 *.prof
 
-velarix.data/
-velarix_test_bin
+# Python
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
 __pycache__/
 *.pyc
-node_modules/
-sdks/typescript/node_modules/
 
-# Internal Scratchpads (Not for Repo)
-Me.txt
-Notes for velarix.txt
-Velarix.txt
-todo.txt
-
-# Web & Build Artifacts
-web/.next/
-web/dev.log
-web/tsconfig.tsbuildinfo
-
-# Tooling
-.claude/
-CLAUDE.md
+# Editor and OS noise
+.DS_Store
+.idea/
+.vscode/
+*.swp

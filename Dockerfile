@@ -1,16 +1,35 @@
-# Velarix Dockerfile
-FROM golang:1.22-alpine AS builder
+# syntax=docker/dockerfile:1
 
-WORKDIR /app
-COPY go.mod go.sum ./
-RUN go mod download
+FROM golang:1.26-alpine AS builder
 
+WORKDIR /src
+COPY go.mod ./
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -o velarix .
 
-FROM alpine:latest
+ARG VERSION=0.1.0
+ARG COMMIT=
+RUN CGO_ENABLED=0 go build -trimpath \
+    -ldflags "-s -w -X github.com/qeinstein/paradox/version.Version=${VERSION} -X github.com/qeinstein/paradox/version.Commit=${COMMIT}" \
+    -o /out/paradox ./cmd/paradox
+
+FROM alpine:3.22
+
+RUN apk add --no-cache ca-certificates python3 util-linux \
+    && addgroup -S paradox \
+    && adduser -S -G paradox -h /app paradox
+
 WORKDIR /app
-COPY --from=builder /app/velarix .
+COPY --from=builder /out/paradox /usr/local/bin/paradox
+
+RUN mkdir -p /data/runs /data/evals \
+    && chown -R paradox:paradox /data
+
+USER paradox
+ENV PARADOX_RUNS_DIR=/data/runs \
+    PARADOX_EVAL_DIR=/data/evals
+
+VOLUME ["/data"]
 EXPOSE 8080
 
-CMD ["./velarix", "--lite"]
+ENTRYPOINT ["paradox"]
+CMD ["serve", "--addr", "0.0.0.0:8080"]

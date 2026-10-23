@@ -2,7 +2,6 @@ package core
 
 import (
 	"errors"
-	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -139,13 +138,11 @@ func (gt *GlobalTruth) AssertGlobal(fact *Fact) (int64, error) {
 	// - Updates to existing global facts are broadcast selectively based on the
 	//   dependency index and global connected-components.
 	targets := map[string]*Engine{}
-	selective := false
 	if !existed {
 		for sid, eng := range gt.subscribers {
 			targets[sid] = eng
 		}
 	} else {
-		selective = true
 		for _, sid := range gt.affectedSubscribersLocked(fact.ID) {
 			if eng, ok := gt.subscribers[sid]; ok {
 				targets[sid] = eng
@@ -154,14 +151,11 @@ func (gt *GlobalTruth) AssertGlobal(fact *Fact) (int64, error) {
 		// If we couldn't compute any affected subscribers, fall back to full
 		// broadcast to preserve correctness.
 		if len(targets) == 0 {
-			selective = false
 			for sid, eng := range gt.subscribers {
 				targets[sid] = eng
 			}
 		}
 	}
-
-	GlobalFanoutTotal.WithLabelValues(fmt.Sprintf("%t", selective)).Inc()
 
 	for _, eng := range targets {
 		_ = eng.AssertFact(cloneFact(broadcast))
@@ -192,10 +186,8 @@ func (gt *GlobalTruth) RetractGlobal(factID string, reason string) (int64, error
 	version := gt.version.Add(1)
 
 	targets := gt.subscribers
-	selective := false
 	affected := gt.affectedSubscribersLocked(factID)
 	if len(affected) > 0 && len(affected) < len(gt.subscribers) {
-		selective = true
 		targets = map[string]*Engine{}
 		for _, sid := range affected {
 			if eng, ok := gt.subscribers[sid]; ok {
@@ -203,7 +195,6 @@ func (gt *GlobalTruth) RetractGlobal(factID string, reason string) (int64, error
 			}
 		}
 	}
-	GlobalFanoutTotal.WithLabelValues(fmt.Sprintf("%t", selective)).Inc()
 
 	for _, eng := range targets {
 		_ = eng.RetractFact(factID, reason)

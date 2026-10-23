@@ -13,7 +13,7 @@ import (
 	"sync"
 	"unicode"
 
-	"velarix/core"
+	"github.com/qeinstein/paradox/core"
 )
 
 // ExtractionTier selects which extraction pipeline to use.
