@@ -1,75 +1,80 @@
-name: CI Checks
+name: CI
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main", "feat/**"]
   pull_request:
-    branches: [ "main" ]
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  go-checks:
-    name: Go Tests & Security
+  test:
+    name: Go tests and runtime smoke checks
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - name: Checkout code
+      - name: Check out repository
         uses: actions/checkout@v4
 
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.26.x'
+          go-version-file: go.mod
+          cache: false
 
-      - name: Verify dependencies
+      - name: Verify modules
         run: go mod verify
 
-      - name: Go Format
-        run: if [ "$(gofmt -s -l . | wc -l)" -gt 0 ]; then echo "Formatting issues found. Run 'go fmt ./...'"; exit 1; fi
+      - name: Check formatting
+        run: |
+          files="$(gofmt -s -l .)"
+          if [ -n "$files" ]; then
+            echo "Formatting issues found:"
+            echo "$files"
+            exit 1
+          fi
 
-      - name: Go Vet
+      - name: Vet
         run: go vet ./...
 
-      - name: Run Go tests with coverage
-        run: go test ./... -v -coverprofile=coverage.txt -covermode=atomic
+      - name: Test with coverage
+        run: go test ./... -count=1 -timeout 180s -coverprofile=coverage.txt -covermode=atomic
+
+      - name: Build
+        run: go build ./cmd/paradox
+
+      - name: Smoke test the scientific slice
+        run: |
+          go run ./cmd/paradox run --provider mock --mode paradox \
+            --runs-dir "$RUNNER_TEMP/runs" --json > "$RUNNER_TEMP/run.json"
+
+      - name: Smoke test matched evaluation
+        run: |
+          go run ./cmd/paradox eval --provider mock --suite science \
+            --modes baseline,evidence,paradox --trials 1 \
+            --runs-dir "$RUNNER_TEMP/runs" --output "$RUNNER_TEMP/evals" \
+            --markdown "$RUNNER_TEMP/report.md" --json > "$RUNNER_TEMP/report.json"
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: paradox-diagnostics
+          if-no-files-found: ignore
+          path: |
+            coverage.txt
+            ${{ runner.temp }}/run.json
+            ${{ runner.temp }}/report.json
+            ${{ runner.temp }}/report.md
 
       - name: Install govulncheck
         run: go install golang.org/x/vuln/cmd/govulncheck@latest
 
-      - name: Run govulncheck
+      - name: Check vulnerabilities
         run: govulncheck ./...
-
-      - name: Upload Go coverage
-        uses: actions/upload-artifact@v4
-        with:
-          name: go-coverage
-          path: coverage.txt
-
-  python-checks:
-    name: Python SDK Tests
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Go (for embed tests)
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.26.x'
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install dependencies
-        shell: bash
-        run: |
-          cd sdks/python
-          python -m pip install --upgrade pip
-          pip install -e .[test]
-          pip install pytest
-
-      - name: Run pytest
-        shell: bash
-        run: |
-          cd sdks/python
-          pytest -v

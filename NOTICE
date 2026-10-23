@@ -2,3 +2,7 @@ Velarix Epistemic Protocol
 Copyright 2026 Velarix
 
 This product includes software developed at Velarix.
+
+PARADOX is derived from the Velarix Epistemic Protocol. The symbolic
+truth-maintenance kernel, justification-graph machinery, and their original
+tests are preserved and adapted under the Apache License, Version 2.0.
