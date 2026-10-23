@@ -87,6 +87,9 @@ func Run(ctx context.Context, options RunOptions) (*RunOutput, error) {
 	if options.RunID == "" {
 		options.RunID = harness.NewRunID()
 	}
+	if err := runstore.ValidateRunID(options.RunID); err != nil {
+		return nil, err
+	}
 	store, err := runstore.New(options.RunsDir)
 	if err != nil {
 		return nil, err
@@ -173,7 +176,7 @@ func BuildProvider(cfg ProviderConfig) (harness.ModelProvider, error) {
 		if strings.TrimSpace(cfg.APIKey) == "" {
 			return nil, errors.New("Meta Model API requires META_API_KEY or MODEL_API_KEY")
 		}
-		return provider.NewMeta(cfg.APIKey, cfg.Model), nil
+		return provider.NewMetaWithPricing(cfg.APIKey, cfg.Model, cfg.InputPricePerMillion, cfg.OutputPricePerMillion), nil
 	case "openrouter":
 		if strings.TrimSpace(cfg.APIKey) == "" {
 			return nil, errors.New("OpenRouter requires OPENROUTER_API_KEY")
@@ -181,7 +184,7 @@ func BuildProvider(cfg ProviderConfig) (harness.ModelProvider, error) {
 		if strings.TrimSpace(cfg.Model) == "" {
 			return nil, errors.New("OpenRouter requires an explicit --model; use 'paradox models --provider openrouter' to list current models")
 		}
-		return provider.NewOpenRouter(cfg.APIKey, cfg.Model), nil
+		return provider.NewOpenRouterWithPricing(cfg.APIKey, cfg.Model, cfg.InputPricePerMillion, cfg.OutputPricePerMillion), nil
 	case "openai-compatible":
 		if strings.TrimSpace(cfg.BaseURL) == "" {
 			return nil, errors.New("openai-compatible requires --base-url")

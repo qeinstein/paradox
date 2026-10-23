@@ -80,11 +80,10 @@ func Run(ctx context.Context, cfg RunConfig) (*RunResult, error) {
 		return nil, err
 	}
 
-	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, cfg.Budget.Timeout())
-		defer cancel()
-	}
+	// The run budget is authoritative even when the caller supplies a longer
+	// context deadline. If the caller's deadline is sooner, WithTimeout keeps it.
+	ctx, cancel := context.WithTimeout(ctx, cfg.Budget.Timeout())
+	defer cancel()
 
 	domainCtx, err := cfg.Domain.Init(ctx, cfg.Task)
 	if err != nil {
@@ -229,7 +228,7 @@ func (r *Runner) run(ctx context.Context) *RunResult {
 	result := &RunResult{
 		RunID: r.cfg.RunID, Mode: r.cfg.Mode, Provider: r.cfg.Provider.Name(),
 		Model: r.cfg.Provider.Model(), TaskID: r.cfg.Task.ID,
-		Success: evaluation != nil && evaluation.Success,
+		Success: runErr == nil && evaluation != nil && evaluation.Success,
 		Score: func() float64 {
 			if evaluation == nil {
 				return 0
@@ -322,12 +321,15 @@ func (r *Runner) executeToolCall(ctx context.Context, call ToolCall) (*ToolResul
 	if !ok {
 		return nil, fmt.Errorf("unknown tool %q", call.Name)
 	}
-	return r.runDomainTool(ctx, call.Name, tool, json.RawMessage(call.Arguments), "agent")
+	return r.runDomainTool(ctx, call.Name, tool, json.RawMessage(call.Arguments), "agent", r.cfg.Budget.ToolTimeout())
 }
 
-func (r *Runner) runDomainTool(ctx context.Context, name string, tool Tool, args json.RawMessage, origin string) (*ToolResult, error) {
+func (r *Runner) runDomainTool(ctx context.Context, name string, tool Tool, args json.RawMessage, origin string, timeout time.Duration) (*ToolResult, error) {
 	r.emit("tool_call", map[string]any{"tool": name, "origin": origin, "arguments": truncate(string(args), 4000)})
-	toolCtx, cancel := context.WithTimeout(ctx, r.cfg.Budget.ToolTimeout())
+	if timeout <= 0 {
+		timeout = r.cfg.Budget.ToolTimeout()
+	}
+	toolCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	result, err := tool.Handler(toolCtx, &ToolContext{
 		RunID: r.cfg.RunID, WorkDir: r.cfg.WorkDir,
@@ -339,18 +341,34 @@ func (r *Runner) runDomainTool(ctx context.Context, name string, tool Tool, args
 	if result == nil {
 		return nil, errors.New("tool returned no result")
 	}
+	added := make([]evidence.Node, 0, len(result.Evidence))
 	for _, observation := range result.Evidence {
 		node, err := r.kernel.AddObservation(observation)
 		if err != nil {
 			return nil, fmt.Errorf("record evidence: %w", err)
 		}
 		result.EvidenceIDs = append(result.EvidenceIDs, node.ID)
-		r.emit("observation", map[string]any{"node": node, "tool": name})
+		added = append(added, node)
+	}
+	if len(added) > 0 {
+		r.saveEvidence()
+		for _, node := range added {
+			r.emit("observation", map[string]any{"node": node, "tool": name})
+		}
 	}
 	if len(result.EvidenceIDs) > 0 && r.cfg.Mode != Baseline {
 		r.checkConsistency()
 	}
 	return result, nil
+}
+
+// saveEvidence persists an intermediate snapshot so live clients can inspect
+// the symbolic state while a run is still executing. Final persistence remains
+// in run(), and a failed intermediate write is reported without aborting.
+func (r *Runner) saveEvidence() {
+	if err := r.cfg.Recorder.SaveEvidence(r.kernel.Snapshot()); err != nil {
+		r.emit("persistence_error", map[string]any{"error": "save evidence: " + err.Error()})
+	}
 }
 
 func (r *Runner) submitClaim(ctx context.Context, raw string) (*ToolResult, error) {
@@ -362,6 +380,7 @@ func (r *Runner) submitClaim(ctx context.Context, raw string) (*ToolResult, erro
 	if err != nil {
 		return nil, err
 	}
+	r.saveEvidence()
 	r.emit("claim_submitted", map[string]any{
 		"claim": claim.Claim, "assumptions": claim.Assumptions, "guard_id": claim.GuardID,
 	})
@@ -397,6 +416,10 @@ func (r *Runner) verifyClaim(ctx context.Context, claim evidence.Node) bool {
 	if maxPlans <= 0 {
 		maxPlans = 1
 	}
+	timeout := time.Duration(r.cfg.Verification.TimeoutMS) * time.Millisecond
+	if timeout <= 0 {
+		timeout = r.cfg.Budget.ToolTimeout()
+	}
 	invalidated := false
 	for index, plan := range plans {
 		if index >= maxPlans {
@@ -429,7 +452,7 @@ func (r *Runner) verifyClaim(ctx context.Context, claim evidence.Node) bool {
 			r.emit("verification_error", map[string]any{"plan_id": plan.ID, "error": err.Error()})
 			continue
 		}
-		result, err := r.runDomainTool(ctx, plan.Tool, tool, args, "verification")
+		result, err := r.runDomainTool(ctx, plan.Tool, tool, args, "verification", timeout)
 		if err != nil {
 			r.emit("verification_error", map[string]any{"plan_id": plan.ID, "error": err.Error()})
 			continue
@@ -455,10 +478,12 @@ func (r *Runner) verifyClaim(ctx context.Context, claim evidence.Node) bool {
 		if outcome.Contradicted {
 			contradiction, err := r.kernel.MarkContradiction(plan.ClaimID, outcome.AssumptionID, outcome.EvidenceID, outcome.Reason)
 			if err != nil {
+				r.saveEvidence()
 				r.emit("verification_error", map[string]any{"plan_id": plan.ID, "error": err.Error()})
 				continue
 			}
 			invalidated = true
+			r.saveEvidence()
 			r.emit("contradiction_detected", map[string]any{"contradiction": contradiction.Contradiction})
 			r.emit("claim_invalidated", map[string]any{
 				"claim_id": plan.ClaimID, "assumption_id": outcome.AssumptionID,
@@ -473,6 +498,7 @@ func (r *Runner) verifyClaim(ctx context.Context, claim evidence.Node) bool {
 		if outcome.AssumptionID != "" {
 			_ = r.kernel.SetVerification(outcome.AssumptionID, evidence.Verified, outcome.Method)
 		}
+		r.saveEvidence()
 		r.emit("verification_passed", map[string]any{
 			"plan_id": plan.ID, "claim_id": plan.ClaimID,
 			"assumption_id": outcome.AssumptionID, "evidence_id": outcome.EvidenceID,
@@ -501,6 +527,7 @@ func (r *Runner) checkConsistency() {
 				continue
 			}
 			if err := r.kernel.Retract(factID, issue.Message, "consistency"); err == nil {
+				r.saveEvidence()
 				r.emit("claim_invalidated", map[string]any{"claim_id": factID, "reason": issue.Message})
 				r.invalidations = append(r.invalidations, "CLAIM "+factID+" INVALIDATED: "+issue.Message)
 			}

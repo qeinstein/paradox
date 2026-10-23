@@ -340,6 +340,7 @@ a { color: var(--accent); }
 .artifact-button { background: none; border: 0; color: var(--accent); cursor: pointer; font-family: var(--mono); font-size: 11px; padding: 0; text-align: left; }
 .artifact-button:hover { text-decoration: underline; }
 .error-text { color: var(--red); font-family: var(--mono); font-size: 11px; white-space: pre-wrap; }
+.section-heading { margin-top: 16px; }
 .raw { background: var(--bg-soft); border: 1px solid var(--line-soft); border-radius: 10px; color: #c8d4e5; font-family: var(--mono); font-size: 10px; margin: 0; max-height: 60vh; overflow: auto; padding: 12px; white-space: pre-wrap; }
 
 .modal { align-items: flex-start; background: rgba(3, 6, 10, 0.72); display: flex; inset: 0; justify-content: center; overflow-y: auto; padding: 6vh 20px; position: fixed; z-index: 50; }

@@ -23,6 +23,26 @@ type Store struct {
 	root string
 }
 
+// ValidateRunID rejects path separators and surprising characters before an id
+// is joined to a filesystem path. Generated ids use only letters, digits, and
+// dashes, but user-supplied --run-id values are validated with the same rule.
+func ValidateRunID(runID string) error {
+	if runID == "" || strings.TrimSpace(runID) != runID {
+		return errors.New("run id must be non-empty and contain no surrounding whitespace")
+	}
+	if runID == "." || runID == ".." {
+		return errors.New("invalid run id")
+	}
+	for _, char := range runID {
+		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') ||
+			(char >= '0' && char <= '9') || char == '-' || char == '_' || char == '.' {
+			continue
+		}
+		return fmt.Errorf("run id contains unsupported character %q", char)
+	}
+	return nil
+}
+
 func New(root string) (*Store, error) {
 	if strings.TrimSpace(root) == "" {
 		root = ".paradox/runs"
@@ -40,6 +60,9 @@ func (s *Store) Dir(runID string) string { return filepath.Join(s.root, runID) }
 func (s *Store) Create(manifest harness.RunManifest) (*Writer, error) {
 	if manifest.RunID == "" {
 		return nil, errors.New("manifest run id is required")
+	}
+	if err := ValidateRunID(manifest.RunID); err != nil {
+		return nil, err
 	}
 	dir := s.Dir(manifest.RunID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -141,6 +164,9 @@ func (s *Store) List() ([]harness.RunManifest, error) {
 
 func (s *Store) readManifest(runID string) (harness.RunManifest, error) {
 	var manifest harness.RunManifest
+	if err := ValidateRunID(runID); err != nil {
+		return manifest, err
+	}
 	data, err := os.ReadFile(filepath.Join(s.Dir(runID), "manifest.json"))
 	if err != nil {
 		return manifest, err
@@ -168,6 +194,9 @@ func (s *Store) Load(runID string) (*RunRecord, error) {
 }
 
 func (s *Store) ReadResult(runID string) (*harness.RunResult, error) {
+	if err := ValidateRunID(runID); err != nil {
+		return nil, err
+	}
 	data, err := os.ReadFile(filepath.Join(s.Dir(runID), "result.json"))
 	if err != nil {
 		return nil, err
@@ -180,6 +209,9 @@ func (s *Store) ReadResult(runID string) (*harness.RunResult, error) {
 }
 
 func (s *Store) ReadEvidence(runID string) (*evidence.Snapshot, error) {
+	if err := ValidateRunID(runID); err != nil {
+		return nil, err
+	}
 	data, err := os.ReadFile(filepath.Join(s.Dir(runID), "evidence.json"))
 	if err != nil {
 		return nil, err
@@ -192,6 +224,9 @@ func (s *Store) ReadEvidence(runID string) (*evidence.Snapshot, error) {
 }
 
 func (s *Store) ReadEvents(runID string) ([]harness.Event, error) {
+	if err := ValidateRunID(runID); err != nil {
+		return nil, err
+	}
 	file, err := os.Open(filepath.Join(s.Dir(runID), "events.jsonl"))
 	if err != nil {
 		return nil, err

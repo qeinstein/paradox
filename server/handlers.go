@@ -233,12 +233,20 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// Read the status first. If it is terminal, app.Run has already persisted
+	// the result, so the subsequent load observes a consistent snapshot. Doing
+	// this in the opposite order can race with the transition to "completed".
+	status, message := s.runStatus(runID)
 	record, err := s.store.Load(runID)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "run not found")
 		return
 	}
-	status, message := s.runStatus(runID)
+	if status == "completed" && record.Result == nil {
+		if result, readErr := s.store.ReadResult(runID); readErr == nil {
+			record.Result = result
+		}
+	}
 	detail := runDetail{
 		Manifest: record.Manifest, Status: status, Error: message,
 		Result: record.Result, Evidence: record.Evidence,
