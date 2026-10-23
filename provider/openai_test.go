@@ -93,6 +93,27 @@ func TestOpenRouterUsesReasoningObject(t *testing.T) {
 	}
 }
 
+func TestConfiguredPricesProvideCostAccounting(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"model":"x","choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"done"}}],"usage":{"prompt_tokens":1000000,"completion_tokens":500000,"total_tokens":1500000}}`))
+	}))
+	defer server.Close()
+	client := provider.NewOpenAICompatible(provider.OpenAIConfig{
+		Name: "test", BaseURL: server.URL, APIKey: "k", Model: "x",
+		InputPricePerMillion: 2, OutputPricePerMillion: 8,
+	})
+	response, err := client.Complete(context.Background(), &harness.ModelRequest{Model: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !response.Usage.CostAvailable {
+		t.Fatal("expected configured prices to make cost available")
+	}
+	if response.Usage.CostUSD != 6 {
+		t.Fatalf("unexpected configured cost: %f", response.Usage.CostUSD)
+	}
+}
+
 func TestProviderErrorDoesNotLeakKey(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "upstream rejected request", http.StatusBadRequest)

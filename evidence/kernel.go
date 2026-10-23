@@ -1,9 +1,9 @@
 // Package evidence provides PARADOX's typed epistemic layer over the symbolic
 // truth-maintenance kernel in core. Observations are roots, assumptions are
 // explicit roots, and claims are derived facts whose justifications name the
-// evidence and assumptions they depend on. A per-claim contradiction guard is a
-// negated dependency, so asserting a contradiction invalidates the claim and
-// every conclusion that depends on it.
+// evidence and assumptions they depend on. Each claim has a positive
+// contradiction guard. Retracting that guard invalidates the claim and every
+// conclusion that depends on it.
 package evidence
 
 import (

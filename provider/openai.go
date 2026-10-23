@@ -52,11 +52,18 @@ func NewOpenAICompatible(cfg OpenAIConfig) *OpenAIProvider {
 }
 
 func NewMeta(apiKey, model string) *OpenAIProvider {
+	return NewMetaWithPricing(apiKey, model, 0, 0)
+}
+
+// NewMetaWithPricing configures optional per-million-token prices for cost
+// budgets when the Meta API response does not include a cost field.
+func NewMetaWithPricing(apiKey, model string, inputPricePerMillion, outputPricePerMillion float64) *OpenAIProvider {
 	if model == "" {
 		model = "muse-spark-1.3"
 	}
 	return NewOpenAICompatible(OpenAIConfig{
 		Name: "meta", BaseURL: MetaBaseURL, APIKey: apiKey, Model: model,
+		InputPricePerMillion: inputPricePerMillion, OutputPricePerMillion: outputPricePerMillion,
 		Capabilities: harness.Capabilities{
 			ToolCalls: true, StructuredOutput: true, Reasoning: true,
 			Streaming: true, MaxContextTokens: 1048576,
@@ -65,8 +72,15 @@ func NewMeta(apiKey, model string) *OpenAIProvider {
 }
 
 func NewOpenRouter(apiKey, model string) *OpenAIProvider {
+	return NewOpenRouterWithPricing(apiKey, model, 0, 0)
+}
+
+// NewOpenRouterWithPricing configures optional fallback prices for cost
+// accounting. OpenRouter normally reports the actual request cost.
+func NewOpenRouterWithPricing(apiKey, model string, inputPricePerMillion, outputPricePerMillion float64) *OpenAIProvider {
 	return NewOpenAICompatible(OpenAIConfig{
 		Name: "openrouter", BaseURL: OpenRouterBaseURL, APIKey: apiKey, Model: model,
+		InputPricePerMillion: inputPricePerMillion, OutputPricePerMillion: outputPricePerMillion,
 		Capabilities: harness.Capabilities{
 			ToolCalls: true, StructuredOutput: true, Reasoning: true, Streaming: true,
 		},

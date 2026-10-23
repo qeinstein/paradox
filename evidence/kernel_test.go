@@ -100,6 +100,16 @@ func TestGraphContainsContradictionGuard(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatalf("expected negated contradiction-guard edge, edges: %+v", snapshot.Edges)
+		t.Fatalf("expected positive contradiction-guard edge, edges: %+v", snapshot.Edges)
+	}
+
+	foundContradiction := false
+	for _, node := range snapshot.Nodes {
+		if node.Kind == evidence.KindContradiction && !node.Internal && node.Active {
+			foundContradiction = true
+		}
+	}
+	if foundContradiction {
+		t.Fatalf("a guard should not appear as a user-facing active contradiction: %+v", snapshot.Nodes)
 	}
 }

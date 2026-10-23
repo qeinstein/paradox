@@ -244,7 +244,7 @@ function renderStats(detail, stats) {
     stat("Contradictions", stats.contradictions || 0, (stats.retractions || 0) + " retractions"),
     stat("Verifications", verification, (stats.assumptions || 0) + " assumptions"),
     stat("Tokens", usage.total_tokens || 0, (usage.prompt_tokens || 0) + " prompt / " + (usage.completion_tokens || 0) + " completion"),
-    stat("Cost", fmtCost(usage), usage.cost_available ? "provider-reported" : "not reported"),
+    stat("Cost", fmtCost(usage), usage.cost_available ? "reported or configured" : "not reported"),
     stat("Duration", fmtDuration(result ? result.duration_ms : 0), result ? result.steps + " steps" : ""),
     stat("Inference", usage.inference_calls || 0, "model calls"),
     stat("Tools", usage.tool_calls || 0, "executed calls"),
@@ -646,11 +646,11 @@ async function showEval(evalID) {
         "<dt>trials</dt><dd>" + (report.trials || 0) + " per mode</dd>" +
         "<dt>created</dt><dd>" + esc(fmtTime(report.created_at)) + "</dd>" +
       "</dl>" +
-      '<h3 class="eyebrow" style="margin-top:16px">Mode comparison</h3>' +
+      '<h3 class="eyebrow section-heading">Mode comparison</h3>' +
       '<table class="data"><thead><tr><th>Mode</th><th>Runs</th><th>Success</th><th>Score</th><th>Unsupported</th><th>Bad retractions</th><th>Verification</th><th>Tokens</th></tr></thead><tbody>' + rows + "</tbody></table>" +
-      '<h3 class="eyebrow" style="margin-top:16px">Runs</h3>' +
+      '<h3 class="eyebrow section-heading">Runs</h3>' +
       '<table class="data"><thead><tr><th>Run</th><th>Mode</th><th>Trial</th><th>Success</th><th>Score</th><th>Error</th></tr></thead><tbody>' + runRows + "</tbody></table>" +
-      '<h3 class="eyebrow" style="margin-top:16px">Notes</h3><ul>' + (report.notes || []).map((note) => "<li>" + esc(note) + "</li>").join("") + "</ul>";
+      '<h3 class="eyebrow section-heading">Notes</h3><ul>' + (report.notes || []).map((note) => "<li>" + esc(note) + "</li>").join("") + "</ul>";
     $("eval-modal").classList.remove("hidden");
   } catch (error) {
     toast("Could not load evaluation: " + error.message);

@@ -7,7 +7,6 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -221,8 +220,5 @@ func (s *Server) cancelRun(runID string) bool {
 }
 
 func (s *Server) checkRunID(runID string) error {
-	if runID == "" || strings.ContainsAny(runID, `/\`) || runID == "." || runID == ".." {
-		return fmt.Errorf("invalid run id")
-	}
-	return nil
+	return runstore.ValidateRunID(runID)
 }
