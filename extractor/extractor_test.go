@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"velarix/extractor"
+	"github.com/qeinstein/paradox/extractor"
 )
 
 // chatCompletionBody wraps content in a minimal OpenAI chat-completion envelope.

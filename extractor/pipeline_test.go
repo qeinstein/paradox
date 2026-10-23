@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	"velarix/core"
+	"github.com/qeinstein/paradox/core"
 )
 
 type mockLLM struct {

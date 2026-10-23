@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"velarix/core"
+	"github.com/qeinstein/paradox/core"
 )
 
 // ---------------------------------------------------------------------------
