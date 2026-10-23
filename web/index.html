@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PARADOX — evidence-grounded agent harness</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <div class="brand">
+        <span class="mark" aria-hidden="true">◈</span>
+        <div>
+          <h1>PARADOX</h1>
+          <p>evidence-grounded agent harness</p>
+        </div>
+      </div>
+      <div class="topbar-right">
+        <span id="connection" class="connection">connecting</span>
+        <span id="version" class="version"></span>
+        <button id="refresh" class="button ghost" type="button">Refresh</button>
+      </div>
+    </header>
+
+    <div class="layout">
+      <aside class="sidebar">
+        <section class="panel">
+          <div class="panel-heading">
+            <h2>Runs</h2>
+            <span id="run-count" class="muted"></span>
+          </div>
+          <div id="runs" class="run-list" aria-live="polite"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-heading">
+            <h2>New run</h2>
+          </div>
+          <form id="run-form" class="form">
+            <label>Mode
+              <select id="mode">
+                <option value="paradox" selected>paradox — verify and revise</option>
+                <option value="evidence">evidence — dependencies only</option>
+                <option value="baseline">baseline — no revision</option>
+              </select>
+            </label>
+            <label>Provider
+              <select id="provider">
+                <option value="mock" selected>mock (deterministic)</option>
+                <option value="meta">Meta Model API</option>
+                <option value="openrouter">OpenRouter</option>
+                <option value="openai-compatible">OpenAI-compatible</option>
+              </select>
+            </label>
+            <label>Model
+              <input id="model" type="text" value="mock-science-v1" spellcheck="false" autocomplete="off">
+            </label>
+            <label>Task
+              <select id="task">
+                <option value="science-primality-v1" selected>Primality of n²+n+41 over [0,100]</option>
+              </select>
+            </label>
+            <div class="form-row">
+              <label>Max steps
+                <input id="max-steps" type="number" min="1" value="20">
+              </label>
+              <label>Max tokens
+                <input id="max-tokens" type="number" min="1" value="200000">
+              </label>
+            </div>
+            <button type="submit" class="button primary">Start run</button>
+            <p class="hint">Runs execute on the server. Provider keys are read from server environment variables and are never sent to the browser.</p>
+          </form>
+        </section>
+
+        <section class="panel">
+          <div class="panel-heading">
+            <h2>Evaluations</h2>
+            <button id="refresh-evals" class="link" type="button">refresh</button>
+          </div>
+          <div id="evals" class="eval-list"></div>
+        </section>
+      </aside>
+
+      <main class="main">
+        <section id="empty" class="empty">
+          <div class="empty-mark">◈</div>
+          <h2>No run selected</h2>
+          <p>Select a persisted run or start a new one. The timeline, evidence graph, and result are rendered from the run's actual event stream and symbolic evidence snapshot.</p>
+        </section>
+
+        <div id="run-view" class="hidden">
+          <section class="run-header panel">
+            <div>
+              <div id="run-id" class="eyebrow"></div>
+              <h2 id="run-task"></h2>
+              <div id="run-meta" class="meta"></div>
+            </div>
+            <div class="run-actions">
+              <span id="run-status" class="badge"></span>
+              <button id="cancel-run" class="button danger hidden" type="button">Cancel</button>
+            </div>
+          </section>
+
+          <section id="stats" class="stats"></section>
+
+          <section class="panel workspace">
+            <div class="tabs" role="tablist">
+              <button data-tab="timeline" class="tab active" type="button">Timeline</button>
+              <button data-tab="evidence" class="tab" type="button">Evidence graph</button>
+              <button data-tab="result" class="tab" type="button">Result</button>
+              <button data-tab="raw" class="tab" type="button">Raw</button>
+            </div>
+            <div id="tab-timeline" class="tab-panel active">
+              <div class="live-line">
+                <span id="live-dot" class="dot"></span>
+                <span id="live-label">Persisted events</span>
+              </div>
+              <div id="timeline" class="timeline"></div>
+            </div>
+            <div id="tab-evidence" class="tab-panel">
+              <div class="legend">
+                <span><i class="swatch observation"></i>observation</span>
+                <span><i class="swatch assumption"></i>assumption</span>
+                <span><i class="swatch claim"></i>claim</span>
+                <span><i class="swatch contradiction"></i>contradiction</span>
+                <span><i class="swatch invalid"></i>invalid</span>
+              </div>
+              <div id="graph" class="graph"></div>
+              <div id="node-detail" class="node-detail"></div>
+            </div>
+            <div id="tab-result" class="tab-panel">
+              <div id="result"></div>
+            </div>
+            <div id="tab-raw" class="tab-panel">
+              <pre id="raw" class="raw"></pre>
+            </div>
+          </section>
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <div id="eval-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="eval-modal-title">
+    <div class="modal-card panel">
+      <div class="panel-heading">
+        <h2 id="eval-modal-title">Evaluation</h2>
+        <button id="eval-modal-close" class="button ghost" type="button">Close</button>
+      </div>
+      <div id="eval-modal-body"></div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden" role="status"></div>
+  <script src="/app.js"></script>
+</body>
+</html>
