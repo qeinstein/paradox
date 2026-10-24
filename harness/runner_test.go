@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -106,6 +107,39 @@ func TestProviderRetriesThenSucceeds(t *testing.T) {
 	}
 	if recorder.eventTypes()["provider_error"] != 2 {
 		t.Fatalf("expected two provider_error events: %+v", recorder.eventTypes())
+	}
+}
+
+func TestProviderStateIsPassedBetweenTurnsAndResetForEachRun(t *testing.T) {
+	runNumber := 0
+	provider := harness.NewMock("test", "test-model", func(_ context.Context, req *harness.ModelRequest) (*harness.ModelResponse, error) {
+		if len(req.Messages) == 1 {
+			if req.ProviderState != "" {
+				return nil, errors.New("provider state leaked into a new run")
+			}
+			runNumber++
+			return &harness.ModelResponse{
+				ToolCalls:     []harness.ToolCall{{ID: "call-echo", Name: "echo", Arguments: `{}`}},
+				ProviderState: fmt.Sprintf("response-%d", runNumber),
+			}, nil
+		}
+		if req.ProviderState != fmt.Sprintf("response-%d", runNumber) {
+			return nil, fmt.Errorf("provider state did not continue current run: %q", req.ProviderState)
+		}
+		return &harness.ModelResponse{Content: "finished"}, nil
+	})
+	echo := harness.Tool{
+		Name: "echo", Description: "returns ok",
+		Handler: func(context.Context, *harness.ToolContext, json.RawMessage) (*harness.ToolResult, error) {
+			return &harness.ToolResult{Content: "ok"}, nil
+		},
+	}
+	domain := &stubDomain{tools: []harness.Tool{echo}, evaluation: harness.Evaluation{Success: true, Score: 1}}
+	for i := 0; i < 2; i++ {
+		result := runTestHarness(t, context.Background(), provider, domain, testBudget(), &captureRecorder{})
+		if !result.Success {
+			t.Fatalf("run %d failed: %+v", i+1, result)
+		}
 	}
 }
 

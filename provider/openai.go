@@ -1,7 +1,6 @@
-// Package provider contains model-agnostic inference adapters. The OpenAI-
-// compatible adapter is used for Meta Model API and OpenRouter; both document
-// an OpenAI-compatible chat-completions surface. Scientific logic lives in
-// domain packages and never imports a provider.
+// Package provider contains model-agnostic inference adapters. OpenRouter uses
+// its OpenAI-compatible Chat Completions surface; Meta uses its Responses API
+// for stateful multi-turn reasoning. Scientific logic never imports a provider.
 package provider
 
 import (
@@ -102,6 +101,9 @@ func (p *OpenAIProvider) Complete(ctx context.Context, req *harness.ModelRequest
 	}
 	if strings.TrimSpace(req.Model) == "" {
 		return nil, errors.New("model id is empty")
+	}
+	if p.cfg.Name == "meta" {
+		return p.completeMetaResponses(ctx, req)
 	}
 	body, err := p.buildRequest(req)
 	if err != nil {

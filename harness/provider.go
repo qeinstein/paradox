@@ -52,15 +52,17 @@ type ModelRequest struct {
 	ReasoningEffort string          `json:"reasoning_effort,omitempty"`
 	ResponseFormat  *ResponseFormat `json:"response_format,omitempty"`
 	Seed            *int64          `json:"seed,omitempty"`
+	ProviderState   string          `json:"provider_state,omitempty"`
 }
 
 type ModelResponse struct {
-	Content      string     `json:"content,omitempty"`
-	ToolCalls    []ToolCall `json:"tool_calls,omitempty"`
-	FinishReason string     `json:"finish_reason,omitempty"`
-	Model        string     `json:"model,omitempty"`
-	Usage        Usage      `json:"usage"`
-	Raw          []byte     `json:"-"`
+	Content       string     `json:"content,omitempty"`
+	ToolCalls     []ToolCall `json:"tool_calls,omitempty"`
+	FinishReason  string     `json:"finish_reason,omitempty"`
+	Model         string     `json:"model,omitempty"`
+	Usage         Usage      `json:"usage"`
+	ProviderState string     `json:"provider_state,omitempty"`
+	Raw           []byte     `json:"-"`
 }
 
 type Capabilities struct {

@@ -38,6 +38,7 @@ type Runner struct {
 	eventSeq        int64
 	step            int
 	invalidations   []string
+	providerState   string
 	finalText       string
 	finishRequested bool
 	startedAt       time.Time
@@ -291,6 +292,7 @@ func (r *Runner) complete(ctx context.Context) (*ModelResponse, error) {
 		Tools:    r.toolDefs(), MaxTokens: maxTokens,
 		ReasoningEffort: r.cfg.ReasoningEffort,
 		Temperature:     r.cfg.Temperature,
+		ProviderState:   r.providerState,
 	}
 	r.emit("provider_request", map[string]any{
 		"model": request.Model, "messages": len(request.Messages),
@@ -303,6 +305,7 @@ func (r *Runner) complete(ctx context.Context) (*ModelResponse, error) {
 		}
 		response, err := r.cfg.Provider.Complete(ctx, request)
 		if err == nil {
+			r.providerState = response.ProviderState
 			r.usage.InferenceCalls++
 			r.usage.Add(response.Usage)
 			if !response.Usage.CostAvailable {

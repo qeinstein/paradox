@@ -120,7 +120,7 @@ Live verification is generated only in `paradox` mode and only for assumptions t
 
 ## Providers
 
-PARADOX speaks an OpenAI-compatible chat-completions surface and keeps provider logic outside the harness and domains.
+PARADOX presents one model-provider interface to the harness. Provider adapters map each API's tool, usage, and reasoning features into that interface; domain logic never depends on a provider.
 
 | Provider | Use | Credentials |
 |---|---|---|
@@ -146,7 +146,7 @@ go run ./cmd/paradox run --provider openrouter --model <model-id>
 
 The research loop requires structured tool calls. Check the live model catalog before selecting an OpenRouter model; the listing reflects each model's advertised tool, reasoning, structured-output, and context capabilities.
 
-The Meta adapter currently uses the stateless Chat Completions endpoint and replays the visible conversation on each turn. Meta documents its Responses API as the option for carrying reasoning across agent turns; that stateful adapter is not implemented yet.
+The Meta adapter uses the Responses API and chains `previous_response_id` across tool turns. The opaque provider state stays in the active run and is reset between runs; PARADOX does not expose private model reasoning.
 
 Cost accounting is only marked available when the provider reports cost or when per-million-token prices are configured. Missing cost is never estimated.
 

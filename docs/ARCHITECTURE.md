@@ -10,7 +10,7 @@ PARADOX separates a domain-independent runtime from domain-specific tools, verif
 | `evidence/` | Typed epistemic layer: observations, assumptions, claims, guards, contradictions, retractions, verification records, snapshots, statistics. |
 | `harness/` | Provider and tool interfaces, budgets, bounded execution loop, retries, cancellation, event recording, active verification orchestration, replan messages. |
 | `domain/science/` | Science domain adapter, fixed primality experiment, verification plans, domain evaluation, deterministic mock provider. |
-| `provider/` | OpenAI-compatible adapters for Meta Model API, OpenRouter, and custom endpoints; model catalog; usage/cost parsing. |
+| `provider/` | Meta Responses API, OpenRouter/OpenAI-compatible adapters, custom endpoints, model catalogs, and usage/cost parsing. |
 | `app/` | Composition root used by the CLI, HTTP server, and evaluator. |
 | `eval/` | Matched cross-mode evaluation, metrics, JSON/Markdown reports. |
 | `runstore/` | Durable local run artifacts. |
@@ -140,7 +140,7 @@ The run manager holds in-memory cancellation functions and terminal status. On s
 
 Provider keys are read from environment variables only. The browser receives model IDs, never credentials.
 
-The Meta adapter currently uses Chat Completions and resends the visible transcript on every turn. It does not preserve Meta's Responses API reasoning state; see the provider documentation and current implementation scope before comparing long-horizon reasoning behavior across providers.
+The Meta adapter chains Responses API IDs across tool turns. The opaque provider state is held only by the active runner and resets for each run. PARADOX records evidence and explicit decisions; it does not expose or verify private model reasoning.
 
 ## Failure behavior
 
