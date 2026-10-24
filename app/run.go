@@ -121,10 +121,10 @@ func Run(ctx context.Context, options RunOptions) (*RunOutput, error) {
 	runDir := store.Dir(options.RunID)
 	workDir := filepath.Join(runDir, "work")
 	artifactsDir := filepath.Join(runDir, "artifacts")
-	if err := os.MkdirAll(workDir, 0o755); err != nil {
+	if err := os.MkdirAll(workDir, 0o700); err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(artifactsDir, 0o755); err != nil {
+	if err := os.MkdirAll(artifactsDir, 0o700); err != nil {
 		return nil, err
 	}
 	result, err := harness.Run(ctx, harness.RunConfig{
@@ -166,6 +166,11 @@ type ProviderConfig struct {
 	BaseURL               string
 	InputPricePerMillion  float64
 	OutputPricePerMillion float64
+	// OpenRouter capabilities are model-specific. Tool calls remain disabled
+	// unless the caller explicitly confirms the selected model supports them.
+	OpenRouterToolCallsSupported        bool
+	OpenRouterReasoningSupported        bool
+	OpenRouterStructuredOutputSupported bool
 }
 
 func BuildProvider(cfg ProviderConfig) (harness.ModelProvider, error) {
@@ -184,7 +189,12 @@ func BuildProvider(cfg ProviderConfig) (harness.ModelProvider, error) {
 		if strings.TrimSpace(cfg.Model) == "" {
 			return nil, errors.New("OpenRouter requires an explicit --model; use 'paradox models --provider openrouter' to list current models")
 		}
-		return provider.NewOpenRouterWithPricing(cfg.APIKey, cfg.Model, cfg.InputPricePerMillion, cfg.OutputPricePerMillion), nil
+		capabilities := harness.Capabilities{
+			ToolCalls:        cfg.OpenRouterToolCallsSupported,
+			Reasoning:        cfg.OpenRouterReasoningSupported,
+			StructuredOutput: cfg.OpenRouterStructuredOutputSupported,
+		}
+		return provider.NewOpenRouterWithCapabilities(cfg.APIKey, cfg.Model, capabilities, cfg.InputPricePerMillion, cfg.OutputPricePerMillion), nil
 	case "openai-compatible":
 		if strings.TrimSpace(cfg.BaseURL) == "" {
 			return nil, errors.New("openai-compatible requires --base-url")

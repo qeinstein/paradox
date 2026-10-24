@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/qeinstein/paradox/evidence"
@@ -38,8 +39,13 @@ type scanResult struct {
 }
 
 var safeExpression = regexp.MustCompile(`^[0-9nN+\-*^() \t]+$`)
+var exponentLiteral = regexp.MustCompile(`\^\s*([0-9]+)`)
 
 func primalityScanTool() harness.Tool {
+	return primalityScanToolWithDefault("n*n+n+41")
+}
+
+func primalityScanToolWithDefault(defaultExpression string) harness.Tool {
 	return harness.Tool{
 		Name:        "run_experiment",
 		Description: "Execute a deterministic computational experiment in an isolated Python subprocess. Supported experiment: primality_scan, which evaluates an integer polynomial over an inclusive integer range and returns primes, composites, and the first counterexample.",
@@ -53,11 +59,17 @@ func primalityScanTool() harness.Tool {
   },
   "required": ["experiment", "start", "end"]
 }`),
-		Handler: runExperiment,
+		Handler: func(ctx context.Context, tc *harness.ToolContext, raw json.RawMessage) (*harness.ToolResult, error) {
+			return runExperimentWithDefault(ctx, tc, raw, defaultExpression)
+		},
 	}
 }
 
 func runExperiment(ctx context.Context, tc *harness.ToolContext, raw json.RawMessage) (*harness.ToolResult, error) {
+	return runExperimentWithDefault(ctx, tc, raw, "n*n+n+41")
+}
+
+func runExperimentWithDefault(ctx context.Context, tc *harness.ToolContext, raw json.RawMessage, defaultExpression string) (*harness.ToolResult, error) {
 	var args scanArgs
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return nil, fmt.Errorf("invalid experiment arguments: %w", err)
@@ -66,10 +78,16 @@ func runExperiment(ctx context.Context, tc *harness.ToolContext, raw json.RawMes
 		return nil, fmt.Errorf("unsupported experiment %q", args.Experiment)
 	}
 	if strings.TrimSpace(args.Expression) == "" {
-		args.Expression = "n*n+n+41"
+		args.Expression = defaultExpression
 	}
 	if len(args.Expression) > 120 || !safeExpression.MatchString(args.Expression) {
 		return nil, errors.New("expression must contain only n, digits, whitespace, and + - * ^ ( )")
+	}
+	for _, match := range exponentLiteral.FindAllStringSubmatch(args.Expression, -1) {
+		exponent, err := strconv.Atoi(match[1])
+		if err != nil || exponent > 12 {
+			return nil, errors.New("exponents must be between 0 and 12")
+		}
 	}
 	if args.Start < 0 || args.End < args.Start {
 		return nil, errors.New("range must satisfy 0 <= start <= end")

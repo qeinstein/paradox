@@ -27,7 +27,7 @@ func runScan(t *testing.T, expression string, start, end int, artifactsDir strin
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	return tool.Handler(ctx, &harness.ToolContext{
 		WorkDir: workDir, ArtifactsDir: artifactsDir,

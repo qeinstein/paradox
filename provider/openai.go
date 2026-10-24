@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -65,7 +66,7 @@ func NewMetaWithPricing(apiKey, model string, inputPricePerMillion, outputPriceP
 		InputPricePerMillion: inputPricePerMillion, OutputPricePerMillion: outputPricePerMillion,
 		Capabilities: harness.Capabilities{
 			ToolCalls: true, StructuredOutput: true, Reasoning: true,
-			Streaming: true, MaxContextTokens: 1048576,
+			Streaming: true, MaxContextTokens: 1048576, MinOutputTokens: 16,
 		},
 	})
 }
@@ -77,12 +78,17 @@ func NewOpenRouter(apiKey, model string) *OpenAIProvider {
 // NewOpenRouterWithPricing configures optional fallback prices for cost
 // accounting. OpenRouter normally reports the actual request cost.
 func NewOpenRouterWithPricing(apiKey, model string, inputPricePerMillion, outputPricePerMillion float64) *OpenAIProvider {
+	return NewOpenRouterWithCapabilities(apiKey, model, harness.Capabilities{}, inputPricePerMillion, outputPricePerMillion)
+}
+
+// NewOpenRouterWithCapabilities requires capabilities to come from explicit
+// model-specific metadata or user confirmation. The provider API accepting a
+// tools field does not mean every routed model supports tool calls.
+func NewOpenRouterWithCapabilities(apiKey, model string, capabilities harness.Capabilities, inputPricePerMillion, outputPricePerMillion float64) *OpenAIProvider {
 	return NewOpenAICompatible(OpenAIConfig{
 		Name: "openrouter", BaseURL: OpenRouterBaseURL, APIKey: apiKey, Model: model,
 		InputPricePerMillion: inputPricePerMillion, OutputPricePerMillion: outputPricePerMillion,
-		Capabilities: harness.Capabilities{
-			ToolCalls: true, StructuredOutput: true, Reasoning: true, Streaming: true,
-		},
+		Capabilities:   capabilities,
 		ReasoningParam: "reasoning",
 		Headers: map[string]string{
 			"HTTP-Referer": "https://github.com/qeinstein/paradox",
@@ -94,6 +100,23 @@ func NewOpenRouterWithPricing(apiKey, model string, inputPricePerMillion, output
 func (p *OpenAIProvider) Name() string                       { return p.cfg.Name }
 func (p *OpenAIProvider) Model() string                      { return p.cfg.Model }
 func (p *OpenAIProvider) Capabilities() harness.Capabilities { return p.cfg.Capabilities }
+func (p *OpenAIProvider) RedactSensitive(value string) string {
+	return redactSecret(value, p.cfg.APIKey)
+}
+
+// DryRun serializes the exact provider request body without making a network
+// request or adding authorization headers. It is suitable for offline schema
+// and provider-compatibility checks; callers should still redact task content
+// before displaying the returned JSON.
+func (p *OpenAIProvider) DryRun(request *harness.ModelRequest) ([]byte, error) {
+	if request == nil {
+		return nil, errors.New("model request is required")
+	}
+	if p.cfg.Name == "meta" {
+		return p.buildMetaRequest(request)
+	}
+	return p.buildRequest(request)
+}
 
 func (p *OpenAIProvider) Complete(ctx context.Context, req *harness.ModelRequest) (*harness.ModelResponse, error) {
 	if strings.TrimSpace(p.cfg.APIKey) == "" {
@@ -101,6 +124,15 @@ func (p *OpenAIProvider) Complete(ctx context.Context, req *harness.ModelRequest
 	}
 	if strings.TrimSpace(req.Model) == "" {
 		return nil, errors.New("model id is empty")
+	}
+	if p.cfg.Name == "openrouter" && len(req.Tools) > 0 && !p.cfg.Capabilities.ToolCalls {
+		return nil, errors.New("OpenRouter tool support is model-specific and has not been confirmed; select a model whose catalog lists `tools` in supported_parameters")
+	}
+	if p.cfg.Name == "openrouter" && req.ReasoningEffort != "" && !p.cfg.Capabilities.Reasoning {
+		return nil, errors.New("OpenRouter reasoning parameters are model-specific and have not been confirmed; select a model whose catalog lists reasoning support")
+	}
+	if p.cfg.Name == "openrouter" && req.ResponseFormat != nil && !p.cfg.Capabilities.StructuredOutput {
+		return nil, errors.New("OpenRouter structured output is model-specific and has not been confirmed; select a model whose catalog lists response_format support")
 	}
 	if p.cfg.Name == "meta" {
 		return p.completeMetaResponses(ctx, req)
@@ -130,7 +162,7 @@ func (p *OpenAIProvider) Complete(ctx context.Context, req *harness.ModelRequest
 		return nil, readErr
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("%s HTTP %d: %s", p.cfg.Name, resp.StatusCode, truncateString(string(responseBody), 800))
+		return nil, newHTTPStatusError(p.cfg.Name, resp, responseBody, p.cfg.APIKey)
 	}
 	return p.parseResponse(responseBody)
 }
@@ -145,11 +177,6 @@ type chatRequest struct {
 	ReasoningEffort     string           `json:"reasoning_effort,omitempty"`
 	Reasoning           *reasoningConfig `json:"reasoning,omitempty"`
 	ResponseFormat      *responseFormat  `json:"response_format,omitempty"`
-	Usage               *usageOptions    `json:"usage,omitempty"`
-}
-
-type usageOptions struct {
-	Include bool `json:"include"`
 }
 
 type reasoningConfig struct {
@@ -253,11 +280,6 @@ func (p *OpenAIProvider) buildRequest(req *harness.ModelRequest) ([]byte, error)
 		}
 		request.ResponseFormat = format
 	}
-	if p.cfg.Name == "openrouter" {
-		// OpenRouter exposes per-request cost in the usage object when usage
-		// reporting is requested. This is needed for PARADOX cost budgets.
-		request.Usage = &usageOptions{Include: true}
-	}
 	return json.Marshal(request)
 }
 
@@ -354,7 +376,7 @@ func (p *OpenAIProvider) ListModels(ctx context.Context) ([]harness.ModelInfo, e
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("%s models HTTP %d: %s", p.cfg.Name, resp.StatusCode, truncateString(string(body), 500))
+		return nil, newHTTPStatusError(p.cfg.Name+" models", resp, body, p.cfg.APIKey)
 	}
 	var parsed struct {
 		Data []struct {
@@ -407,4 +429,53 @@ func truncateString(value string, limit int) string {
 		return value
 	}
 	return value[:limit] + "..."
+}
+
+type HTTPStatusError struct {
+	Provider   string
+	StatusCode int
+	Delay      time.Duration
+	Message    string
+}
+
+func (e *HTTPStatusError) Error() string {
+	if e.Message == "" {
+		return fmt.Sprintf("%s HTTP %d", e.Provider, e.StatusCode)
+	}
+	return fmt.Sprintf("%s HTTP %d: %s", e.Provider, e.StatusCode, e.Message)
+}
+
+func (e *HTTPStatusError) RetryDelay() time.Duration { return e.Delay }
+
+func newHTTPStatusError(provider string, response *http.Response, body []byte, secret string) *HTTPStatusError {
+	message := redactSecret(string(body), secret)
+	return &HTTPStatusError{
+		Provider: provider, StatusCode: response.StatusCode,
+		Delay:   parseRetryAfter(response.Header.Get("Retry-After")),
+		Message: truncateString(message, 800),
+	}
+}
+
+func parseRetryAfter(value string) time.Duration {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0
+	}
+	if seconds, err := strconv.Atoi(value); err == nil && seconds >= 0 {
+		return time.Duration(seconds) * time.Second
+	}
+	if when, err := http.ParseTime(value); err == nil {
+		if delay := time.Until(when); delay > 0 {
+			return delay
+		}
+	}
+	return 0
+}
+
+func redactSecret(value, secret string) string {
+	if strings.TrimSpace(secret) == "" {
+		return value
+	}
+	value = strings.ReplaceAll(value, secret, "[REDACTED]")
+	return value
 }

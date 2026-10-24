@@ -97,7 +97,11 @@ func Run(ctx context.Context, cfg RunConfig) (*RunResult, error) {
 		tools:     map[string]Tool{},
 		startedAt: time.Now().UTC(),
 	}
-	for _, tool := range cfg.Domain.Tools() {
+	tools := cfg.Domain.Tools()
+	if taskTools, ok := cfg.Domain.(TaskToolAdapter); ok {
+		tools = taskTools.ToolsForTask(cfg.Task)
+	}
+	for _, tool := range tools {
 		r.tools[tool.Name] = tool
 	}
 	return r.run(ctx), nil
@@ -116,6 +120,7 @@ func (r *Runner) run(ctx context.Context) *RunResult {
 
 	var runErr error
 	for r.step < r.cfg.Budget.MaxSteps && !r.finishRequested {
+		r.expireAssumptions()
 		if err := ctx.Err(); err != nil {
 			runErr = fmt.Errorf("run cancelled or timed out: %w", err)
 			break
@@ -138,12 +143,27 @@ func (r *Runner) run(ctx context.Context) *RunResult {
 			runErr = err
 			break
 		}
+		if response == nil {
+			runErr = errors.New("model provider returned a nil response")
+			break
+		}
+		if r.expireAssumptions() {
+			// The model response was generated against premises that expired
+			// during inference. Discard its proposed actions and obtain a fresh
+			// response after the replan message has been appended.
+			continue
+		}
 		if r.cfg.Budget.RequireCost && !r.usage.CostAvailable {
 			runErr = errors.New("provider did not report inference cost and RequireCost is set")
 			break
 		}
 		if err := r.checkInferenceBudget(); err != nil {
 			runErr = err
+			break
+		}
+		if responseTruncated(response.FinishReason) {
+			runErr = fmt.Errorf("provider truncated its response at the output-token limit (%s)", response.FinishReason)
+			r.emit("provider_truncated", map[string]any{"finish_reason": response.FinishReason})
 			break
 		}
 		if len(response.ToolCalls) == 0 {
@@ -157,6 +177,10 @@ func (r *Runner) run(ctx context.Context) *RunResult {
 			r.emit("assistant_message", map[string]any{"content": truncate(response.Content, 12000)})
 			break
 		}
+		if err := validateToolCallIDs(response.ToolCalls); err != nil {
+			runErr = err
+			break
+		}
 
 		assistant := Message{Role: RoleAssistant, Content: response.Content, ToolCalls: response.ToolCalls}
 		r.messages = append(r.messages, assistant)
@@ -165,6 +189,7 @@ func (r *Runner) run(ctx context.Context) *RunResult {
 			"tool_calls": toolCallSummary(response.ToolCalls),
 		})
 
+		expiredDuringCalls := false
 		for _, call := range response.ToolCalls {
 			if r.finishRequested {
 				r.messages = append(r.messages, Message{
@@ -193,6 +218,10 @@ func (r *Runner) run(ctx context.Context) *RunResult {
 				"content":      truncate(content, 12000),
 				"evidence_ids": result.EvidenceIDs,
 			})
+			if r.expireAssumptions() {
+				expiredDuringCalls = true
+				break
+			}
 			if len(r.invalidations) > 0 {
 				for _, message := range r.invalidations {
 					r.messages = append(r.messages, Message{
@@ -206,6 +235,9 @@ func (r *Runner) run(ctx context.Context) *RunResult {
 		}
 		if runErr != nil {
 			break
+		}
+		if expiredDuringCalls {
+			continue
 		}
 	}
 
@@ -294,9 +326,23 @@ func (r *Runner) complete(ctx context.Context) (*ModelResponse, error) {
 		Temperature:     r.cfg.Temperature,
 		ProviderState:   r.providerState,
 	}
+	capabilities := r.cfg.Provider.Capabilities()
+	if capabilities.MinOutputTokens > 0 && request.MaxTokens < capabilities.MinOutputTokens {
+		return nil, fmt.Errorf("remaining token budget (%d) is below provider minimum output (%d)", request.MaxTokens, capabilities.MinOutputTokens)
+	}
+	if contextLimit := capabilities.MaxContextTokens; contextLimit > 0 {
+		estimatedInput := estimateRequestTokens(request)
+		available := contextLimit - estimatedInput
+		if available <= 0 || available < capabilities.MinOutputTokens {
+			return nil, fmt.Errorf("estimated prompt size (%d tokens) exceeds provider context window (%d)", estimatedInput, contextLimit)
+		}
+		if request.MaxTokens > available {
+			request.MaxTokens = available
+		}
+	}
 	r.emit("provider_request", map[string]any{
 		"model": request.Model, "messages": len(request.Messages),
-		"tools": len(request.Tools), "max_tokens": maxTokens,
+		"tools": len(request.Tools), "max_tokens": request.MaxTokens,
 	})
 	var lastErr error
 	for attempt := 0; attempt <= r.cfg.Budget.MaxRetries; attempt++ {
@@ -305,6 +351,10 @@ func (r *Runner) complete(ctx context.Context) (*ModelResponse, error) {
 		}
 		response, err := r.cfg.Provider.Complete(ctx, request)
 		if err == nil {
+			if response == nil {
+				return nil, errors.New("model provider returned a nil response")
+			}
+			response = redactModelResponse(r.cfg.Provider, response)
 			r.providerState = response.ProviderState
 			r.usage.InferenceCalls++
 			r.usage.Add(response.Usage)
@@ -321,10 +371,17 @@ func (r *Runner) complete(ctx context.Context) (*ModelResponse, error) {
 			})
 			return response, nil
 		}
+		if err != nil {
+			err = redactProviderError(r.cfg.Provider, err)
+		}
 		lastErr = err
 		r.emit("provider_error", map[string]any{"attempt": attempt + 1, "error": err.Error()})
 		if attempt < r.cfg.Budget.MaxRetries {
 			delay := time.Duration(150*(attempt+1)) * time.Millisecond
+			var serverDelay RetryDelayError
+			if errors.As(err, &serverDelay) && serverDelay.RetryDelay() > delay {
+				delay = serverDelay.RetryDelay()
+			}
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
@@ -333,6 +390,64 @@ func (r *Runner) complete(ctx context.Context) (*ModelResponse, error) {
 		}
 	}
 	return nil, fmt.Errorf("model call failed after %d attempts: %w", r.cfg.Budget.MaxRetries+1, lastErr)
+}
+
+func responseTruncated(reason string) bool {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "length", "max_tokens", "max_output_tokens":
+		return true
+	default:
+		return false
+	}
+}
+
+func redactProviderError(provider ModelProvider, err error) error {
+	redactor, ok := provider.(SecretRedactor)
+	if !ok || err == nil {
+		return err
+	}
+	return sanitizedProviderError{cause: err, message: redactor.RedactSensitive(err.Error())}
+}
+
+type sanitizedProviderError struct {
+	cause   error
+	message string
+}
+
+func (e sanitizedProviderError) Error() string { return e.message }
+func (e sanitizedProviderError) Unwrap() error { return e.cause }
+func (e sanitizedProviderError) RetryDelay() time.Duration {
+	var retryError RetryDelayError
+	if errors.As(e.cause, &retryError) {
+		return retryError.RetryDelay()
+	}
+	return 0
+}
+
+func redactModelResponse(provider ModelProvider, response *ModelResponse) *ModelResponse {
+	redactor, ok := provider.(SecretRedactor)
+	if !ok || response == nil {
+		return response
+	}
+	copyOfResponse := *response
+	copyOfResponse.Content = redactor.RedactSensitive(response.Content)
+	copyOfResponse.Model = redactor.RedactSensitive(response.Model)
+	copyOfResponse.ToolCalls = append([]ToolCall(nil), response.ToolCalls...)
+	for index := range copyOfResponse.ToolCalls {
+		copyOfResponse.ToolCalls[index].Arguments = redactor.RedactSensitive(copyOfResponse.ToolCalls[index].Arguments)
+	}
+	return &copyOfResponse
+}
+
+// estimateRequestTokens is a conservative byte-based guard used only when a
+// provider advertises a context limit. Exact tokenization remains provider-
+// specific; actual usage is enforced after each response.
+func estimateRequestTokens(request *ModelRequest) int {
+	serialized, err := json.Marshal(request)
+	if err != nil {
+		return 0
+	}
+	return (len(serialized)+1)/2 + 64
 }
 
 func (r *Runner) executeToolCall(ctx context.Context, call ToolCall) (*ToolResult, error) {
@@ -351,6 +466,9 @@ func (r *Runner) executeToolCall(ctx context.Context, call ToolCall) (*ToolResul
 
 func (r *Runner) runDomainTool(ctx context.Context, name string, tool Tool, args json.RawMessage, origin string, timeout time.Duration) (*ToolResult, error) {
 	r.emit("tool_call", map[string]any{"tool": name, "origin": origin, "arguments": truncate(string(args), 4000)})
+	if err := validateToolArguments(tool.Parameters, args); err != nil {
+		return nil, err
+	}
 	if timeout <= 0 {
 		timeout = r.cfg.Budget.ToolTimeout()
 	}
@@ -387,6 +505,23 @@ func (r *Runner) runDomainTool(ctx context.Context, name string, tool Tool, args
 	return result, nil
 }
 
+func validateToolCallIDs(calls []ToolCall) error {
+	seen := map[string]bool{}
+	for index, call := range calls {
+		if strings.TrimSpace(call.ID) == "" {
+			return fmt.Errorf("model returned tool call %d without a tool-call ID", index+1)
+		}
+		if seen[call.ID] {
+			return fmt.Errorf("model returned duplicate tool-call ID %q", call.ID)
+		}
+		seen[call.ID] = true
+		if strings.TrimSpace(call.Name) == "" {
+			return fmt.Errorf("model returned tool call %q without a name", call.ID)
+		}
+	}
+	return nil
+}
+
 // saveEvidence persists an intermediate snapshot so live clients can inspect
 // the symbolic state while a run is still executing. Final persistence remains
 // in run(), and a failed intermediate write is reported without aborting.
@@ -413,11 +548,13 @@ func (r *Runner) submitClaim(ctx context.Context, raw string) (*ToolResult, erro
 		r.emit("assumption_recorded", map[string]any{"node": assumption})
 	}
 
-	invalidated := false
-	if r.cfg.Mode == Paradox && r.cfg.Verification.Enabled {
+	r.expireAssumptions()
+	current, _ := r.kernel.Node(claim.Claim.ID)
+	invalidated := !current.Active
+	if !invalidated && r.cfg.Mode == Paradox && r.cfg.Verification.Enabled {
 		invalidated = r.verifyClaim(ctx, claim.Claim)
 	}
-	current, _ := r.kernel.Node(claim.Claim.ID)
+	current, _ = r.kernel.Node(claim.Claim.ID)
 	status := current.Status
 	message := "claim recorded"
 	if invalidated || status < 0.6 {
@@ -499,6 +636,14 @@ func (r *Runner) verifyClaim(ctx context.Context, claim evidence.Node) bool {
 		if outcome.Method == "" {
 			outcome.Method = plan.Check
 		}
+		if outcome.AssumptionID != "" && outcome.AssumptionID != plan.AssumptionID {
+			r.emit("verification_error", map[string]any{"plan_id": plan.ID, "error": "verifier returned an assumption outside the planned dependency"})
+			continue
+		}
+		if outcome.EvidenceID == "" || !containsString(result.EvidenceIDs, outcome.EvidenceID) {
+			r.emit("verification_error", map[string]any{"plan_id": plan.ID, "error": "verifier must reference evidence produced by this verification tool call"})
+			continue
+		}
 		r.kernel.RecordVerification(plan.ID, plan.ClaimID, outcome.AssumptionID, outcome.EvidenceID, outcome.Method, outcome.Contradicted, outcome.Reason)
 		if outcome.Contradicted {
 			contradiction, err := r.kernel.MarkContradiction(plan.ClaimID, outcome.AssumptionID, outcome.EvidenceID, outcome.Reason)
@@ -560,6 +705,32 @@ func (r *Runner) checkConsistency() {
 	}
 }
 
+func (r *Runner) expireAssumptions() bool {
+	expirations := r.kernel.ExpireAssumptions(time.Now())
+	if len(expirations) == 0 {
+		return false
+	}
+	invalidated := false
+	for _, expiration := range expirations {
+		r.emit("assumption_expired", map[string]any{
+			"assumption_id":      expiration.AssumptionID,
+			"invalidated_claims": expiration.InvalidatedClaims,
+		})
+		for _, claimID := range expiration.InvalidatedClaims {
+			invalidated = true
+			message := fmt.Sprintf("CLAIM %s INVALIDATED: supporting assumption %s expired. Reconsider the conclusion and gather new evidence if needed.", claimID, expiration.AssumptionID)
+			r.messages = append(r.messages, Message{Role: RoleUser, Content: "[HARNESS] " + message})
+			r.emit("claim_invalidated", map[string]any{
+				"claim_id": claimID, "assumption_id": expiration.AssumptionID,
+				"reason": "assumption expired", "cause": "expiration",
+			})
+			r.emit("replan_required", map[string]any{"reason": message})
+		}
+	}
+	r.saveEvidence()
+	return invalidated
+}
+
 func (r *Runner) finish(raw string) (*ToolResult, error) {
 	var args struct {
 		Conclusion string `json:"conclusion"`
@@ -584,6 +755,15 @@ func firstNonEmptyString(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func containsString(values []string, wanted string) bool {
+	for _, value := range values {
+		if value == wanted {
+			return true
+		}
+	}
+	return false
 }
 
 func nodeIDs(nodes []evidence.Node) []string {
@@ -634,7 +814,7 @@ func (r *Runner) systemPrompt() string {
 	}
 	b.WriteString("RULES:\n")
 	b.WriteString("- Execute experiments with tools before drawing conclusions.\n")
-	b.WriteString("- Every claim must cite evidence_ids copied exactly from tool results. If a claim depends on an untested premise, list that premise in assumptions.\n")
+	b.WriteString("- Every claim must cite evidence_ids copied exactly from tool results. Use alternative_evidence_ids only for independent alternative support chains; each inner list is one complete justification. If a claim depends on an untested premise, list that premise in assumptions.\n")
 	b.WriteString("- Distinguish direct observations (tool output) from your interpretation.\n")
 	b.WriteString("- A model assertion is not evidence. Do not cite yourself as evidence.\n")
 	b.WriteString("- If the harness reports that a claim was invalidated, retract or revise it using the new evidence and run a follow-up experiment if needed.\n")
@@ -745,6 +925,7 @@ const submitClaimSchema = `{
     "object": {"type": "string"},
     "confidence": {"type": "number", "minimum": 0, "maximum": 1},
     "evidence_ids": {"type": "array", "items": {"type": "string"}, "description": "Observation IDs copied exactly from tool results."},
+    "alternative_evidence_ids": {"type": "array", "items": {"type": "array", "minItems": 1, "items": {"type": "string"}}, "description": "Independent alternative evidence groups; each group is a complete alternative justification."},
     "assumptions": {
       "type": "array",
       "items": {

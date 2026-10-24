@@ -1,0 +1,30 @@
+{
+  "id": "internal-science-v0.2-development",
+  "suite": "science",
+  "provider": "mock",
+  "model": "mock-science-v1",
+  "modes": ["baseline", "evidence", "paradox"],
+  "trials": 1,
+  "task_ids": [
+    "science-primality-v1",
+    "science-permutation-test-v1",
+    "science-optimization-v1",
+    "science-measurement-revision-v1"
+  ],
+  "budget": {
+    "max_steps": 20,
+    "max_tool_calls": 40,
+    "max_tokens": 20000,
+    "max_cost_usd": 1,
+    "timeout_ms": 120000,
+    "max_retries": 0,
+    "tool_timeout_ms": 30000,
+    "require_cost": false
+  },
+  "verification": {
+    "enabled": true,
+    "max_plans_per_claim": 2,
+    "min_assumption_confidence": 0.95,
+    "timeout_ms": 120000
+  }
+}

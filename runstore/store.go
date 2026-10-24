@@ -47,7 +47,7 @@ func New(root string) (*Store, error) {
 	if strings.TrimSpace(root) == "" {
 		root = ".paradox/runs"
 	}
-	if err := os.MkdirAll(root, 0o755); err != nil {
+	if err := os.MkdirAll(root, 0o700); err != nil {
 		return nil, err
 	}
 	return &Store{root: root}, nil
@@ -65,7 +65,10 @@ func (s *Store) Create(manifest harness.RunManifest) (*Writer, error) {
 		return nil, err
 	}
 	dir := s.Dir(manifest.RunID)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
 		return nil, err
 	}
 	manifestPath := filepath.Join(dir, "manifest.json")
@@ -75,8 +78,12 @@ func (s *Store) Create(manifest harness.RunManifest) (*Writer, error) {
 	if err := writeJSONAtomic(manifestPath, manifest); err != nil {
 		return nil, err
 	}
-	events, err := os.OpenFile(filepath.Join(dir, "events.jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	events, err := os.OpenFile(filepath.Join(dir, "events.jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
+		return nil, err
+	}
+	if err := events.Chmod(0o600); err != nil {
+		_ = events.Close()
 		return nil, err
 	}
 	return &Writer{
@@ -254,9 +261,26 @@ func writeJSONAtomic(path string, value any) error {
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	temporary, err := os.CreateTemp(filepath.Dir(path), ".paradox-*.tmp")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err := temporary.Chmod(0o600); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if _, err := temporary.Write(data); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	return os.Rename(temporaryPath, path)
 }

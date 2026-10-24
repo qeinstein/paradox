@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/qeinstein/paradox/app"
+	"github.com/qeinstein/paradox/domain/science"
 	"github.com/qeinstein/paradox/harness"
 )
 
@@ -24,6 +25,7 @@ Usage:
   paradox trace     Inspect a persisted execution trace
   paradox evidence  Inspect the evidence graph and retractions
   paradox eval      Run matched baseline/evidence/paradox comparisons
+  paradox doctor    Check offline readiness and serialize a provider request locally
   paradox serve     Start the local API and dashboard
   paradox models    List documented or live provider models
   paradox version   Print build identity
@@ -57,6 +59,8 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return evidenceCommand(rest, stdout, stderr)
 	case "eval":
 		return evalCommand(ctx, rest, stdout, stderr)
+	case "doctor":
+		return doctorCommand(ctx, rest, stdout, stderr)
 	case "serve":
 		return serveCommand(ctx, rest, stdout, stderr)
 	case "models":
@@ -73,12 +77,15 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 }
 
 type providerFlags struct {
-	name        string
-	model       string
-	apiKey      string
-	baseURL     string
-	inputPrice  float64
-	outputPrice float64
+	name                       string
+	model                      string
+	apiKey                     string
+	baseURL                    string
+	inputPrice                 float64
+	outputPrice                float64
+	openRouterToolCalls        bool
+	openRouterReasoning        bool
+	openRouterStructuredOutput bool
 }
 
 func addProviderFlags(fs *flag.FlagSet, defaults *providerFlags) {
@@ -88,6 +95,9 @@ func addProviderFlags(fs *flag.FlagSet, defaults *providerFlags) {
 	fs.StringVar(&defaults.baseURL, "base-url", defaults.baseURL, "base URL for openai-compatible providers")
 	fs.Float64Var(&defaults.inputPrice, "input-price", defaults.inputPrice, "input price in USD per million tokens (openai-compatible cost accounting)")
 	fs.Float64Var(&defaults.outputPrice, "output-price", defaults.outputPrice, "output price in USD per million tokens (openai-compatible cost accounting)")
+	fs.BoolVar(&defaults.openRouterToolCalls, "tool-calls-supported", defaults.openRouterToolCalls, "confirm that the selected OpenRouter model lists tools in supported_parameters")
+	fs.BoolVar(&defaults.openRouterReasoning, "reasoning-supported", defaults.openRouterReasoning, "confirm that the selected OpenRouter model supports reasoning parameters")
+	fs.BoolVar(&defaults.openRouterStructuredOutput, "structured-output-supported", defaults.openRouterStructuredOutput, "confirm that the selected OpenRouter model lists response_format support")
 }
 
 func defaultProviderFlags() providerFlags {
@@ -122,6 +132,9 @@ func (p providerFlags) resolve() (app.ProviderConfig, error) {
 		Name: name, Model: strings.TrimSpace(p.model), APIKey: key,
 		BaseURL:              strings.TrimSpace(p.baseURL),
 		InputPricePerMillion: p.inputPrice, OutputPricePerMillion: p.outputPrice,
+		OpenRouterToolCallsSupported:        p.openRouterToolCalls,
+		OpenRouterReasoningSupported:        p.openRouterReasoning,
+		OpenRouterStructuredOutputSupported: p.openRouterStructuredOutput,
 	}
 	if name == "mock" && cfg.Model == "" {
 		cfg.Model = "mock-science-v1"
@@ -202,7 +215,20 @@ func (t taskFlags) task() (harness.Task, error) {
 	}
 	task := app.DefaultScienceTask()
 	if strings.TrimSpace(t.id) != "" {
-		task.ID = strings.TrimSpace(t.id)
+		requested := strings.TrimSpace(t.id)
+		if requested != task.ID {
+			found := false
+			for _, candidate := range science.Tasks() {
+				if candidate.ID == requested {
+					task = candidate
+					found = true
+					break
+				}
+			}
+			if !found {
+				return harness.Task{}, fmt.Errorf("unknown built-in task %q; choose %s, %s, %s, or %s, or provide a JSON task file", requested, science.TaskPrimality, science.TaskPermutationTest, science.TaskOptimization, science.TaskMeasurement)
+			}
+		}
 	}
 	if strings.TrimSpace(t.prompt) != "" {
 		task.Prompt = strings.TrimSpace(t.prompt)

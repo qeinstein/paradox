@@ -62,6 +62,19 @@ func TestStoreRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	for _, path := range []string{
+		store.Dir(manifest.RunID),
+		filepath.Join(store.Dir(manifest.RunID), "manifest.json"),
+		filepath.Join(store.Dir(manifest.RunID), "events.jsonl"),
+	} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm()&0o077 != 0 {
+			t.Fatalf("run artifact %s is group/world accessible: mode %o", path, info.Mode().Perm())
+		}
+	}
 	if err := writer.Record(harness.Event{Seq: 1, RunID: manifest.RunID, Type: "run_started", Time: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}

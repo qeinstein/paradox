@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/qeinstein/paradox/app"
+	"github.com/qeinstein/paradox/benchmark/scienceworld"
 	"github.com/qeinstein/paradox/domain/science"
 	"github.com/qeinstein/paradox/eval"
 	"github.com/qeinstein/paradox/harness"
@@ -23,12 +24,17 @@ func evalCommand(ctx context.Context, args []string, stdout, stderr io.Writer) i
 	fs.SetOutput(stderr)
 	providerFlagsValue := defaultProviderFlags()
 	addProviderFlags(fs, &providerFlagsValue)
+	configPath := fs.String("config", "", "credential-free reproducible evaluation JSON configuration; its run settings override corresponding flags")
 	budgetFlagsValue := defaultBudgetFlags()
 	addBudgetFlags(fs, &budgetFlagsValue)
 	taskOptions := taskFlags{}
 	addTaskFlags(fs, &taskOptions)
 
-	suite := fs.String("suite", eval.DefaultSuite, "evaluation suite (science)")
+	suite := fs.String("suite", eval.DefaultSuite, "evaluation suite (science or scienceworld)")
+	scienceWorldTask := fs.String("benchmark-task", "", "official ScienceWorld task name (required for --suite scienceworld)")
+	scienceWorldVariation := fs.Int("variation", 0, "official ScienceWorld variation index")
+	scienceWorldSimplifications := fs.String("simplifications", "", "official ScienceWorld simplification string")
+	scienceWorldStepLimit := fs.Int("step-limit", 100, "maximum official ScienceWorld environment steps per episode")
 	modesValue := fs.String("modes", "baseline,evidence,paradox", "comma-separated modes, or all")
 	trials := fs.Int("trials", 3, "trials per mode")
 	outputDir := fs.String("output", defaultEvalDir(), "directory for evaluation reports")
@@ -53,10 +59,74 @@ func evalCommand(ctx context.Context, args []string, stdout, stderr io.Writer) i
 		fmt.Fprintf(stderr, "eval: unexpected arguments: %s\n", strings.Join(fs.Args(), " "))
 		return 2
 	}
-	task, err := taskOptions.task()
-	if err != nil {
-		fmt.Fprintf(stderr, "eval: %v\n", err)
-		return 2
+	var configuration *eval.Config
+	if strings.TrimSpace(*configPath) != "" {
+		loaded, err := eval.LoadConfig(strings.TrimSpace(*configPath))
+		if err != nil {
+			fmt.Fprintf(stderr, "eval: %v\n", err)
+			return 2
+		}
+		configuration = &loaded
+		*suite = loaded.Suite
+		*modesValue = joinModes(loaded.Modes)
+		*trials = loaded.Trials
+		providerFlagsValue.name, providerFlagsValue.model = loaded.Provider, loaded.Model
+		providerFlagsValue.baseURL = loaded.BaseURL
+		providerFlagsValue.openRouterToolCalls = loaded.OpenRouterToolCallsSupported
+		providerFlagsValue.openRouterReasoning = loaded.OpenRouterReasoningSupported
+		providerFlagsValue.openRouterStructuredOutput = loaded.OpenRouterStructuredOutputSupported
+		budgetFlagsValue = budgetFlags{
+			maxSteps: loaded.Budget.MaxSteps, maxToolCalls: loaded.Budget.MaxToolCalls,
+			maxTokens: loaded.Budget.MaxTokens, maxCost: loaded.Budget.MaxCostUSD,
+			timeout:     time.Duration(loaded.Budget.TimeoutMS) * time.Millisecond,
+			toolTimeout: time.Duration(loaded.Budget.ToolTimeoutMS) * time.Millisecond,
+			maxRetries:  loaded.Budget.MaxRetries, requireCost: loaded.Budget.RequireCost,
+		}
+		*reasoningEffort = loaded.ReasoningEffort
+		*temperature = -1
+		if loaded.Temperature != nil {
+			*temperature = *loaded.Temperature
+		}
+		*verify = loaded.Verification.Enabled
+		*minAssumptionConfidence = loaded.Verification.MinAssumptionConfidence
+		*maxPlans = loaded.Verification.MaxPlansPerClaim
+		*verificationTimeout = time.Duration(loaded.Verification.TimeoutMS) * time.Millisecond
+	}
+	var task harness.Task
+	var domain harness.DomainAdapter
+	var tasks []harness.Task
+	if configuration != nil {
+		var err error
+		tasks, domain, err = configuration.TasksAndDomain()
+		if err != nil {
+			fmt.Fprintf(stderr, "eval: %v\n", err)
+			return 2
+		}
+	} else if *suite == eval.ScienceWorldSuite {
+		if taskOptions.file != "" || taskOptions.id != "" || taskOptions.prompt != "" || taskOptions.expression != "" {
+			fmt.Fprintln(stderr, "eval: use --benchmark-task and ScienceWorld task options with --suite scienceworld; science task flags are not applicable")
+			return 2
+		}
+		if strings.TrimSpace(*scienceWorldTask) == "" {
+			fmt.Fprintln(stderr, "eval: --benchmark-task is required for --suite scienceworld")
+			return 2
+		}
+		if *scienceWorldVariation < 0 || *scienceWorldStepLimit <= 0 {
+			fmt.Fprintln(stderr, "eval: ScienceWorld variation must be non-negative and step limit must be positive")
+			return 2
+		}
+		task = scienceworld.NewTask(strings.TrimSpace(*scienceWorldTask), *scienceWorldVariation, *scienceWorldSimplifications, *scienceWorldStepLimit)
+		tasks = []harness.Task{task}
+		domain = scienceworld.New()
+	} else {
+		var err error
+		task, err = taskOptions.task()
+		if err != nil {
+			fmt.Fprintf(stderr, "eval: %v\n", err)
+			return 2
+		}
+		tasks = []harness.Task{task}
+		domain = science.New()
 	}
 	modes, err := parseModes(*modesValue)
 	if err != nil {
@@ -77,9 +147,13 @@ func evalCommand(ctx context.Context, args []string, stdout, stderr io.Writer) i
 	if *temperature >= 0 {
 		temperaturePointer = temperature
 	}
+	configID := ""
+	if configuration != nil {
+		configID = configuration.ID
+	}
 	report, runErr := eval.Run(ctx, eval.Options{
-		Suite: *suite, Tasks: []harness.Task{task}, Modes: modes, Trials: *trials,
-		Provider: modelProvider, Domain: science.New(),
+		ConfigID: configID, Suite: *suite, Tasks: tasks, Modes: modes, Trials: *trials,
+		Provider: modelProvider, Domain: domain,
 		Budget: budgetFlagsValue.budget(), Verification: verification,
 		RunsDir: *runsDir, OutputDir: *outputDir, EvalID: strings.TrimSpace(*evalID),
 		GitCommit: app.GitCommit(), ReasoningEffort: strings.TrimSpace(*reasoningEffort),
@@ -93,7 +167,7 @@ func evalCommand(ctx context.Context, args []string, stdout, stderr io.Writer) i
 		markdown := eval.RenderMarkdown(report)
 		if *markdownPath == "-" {
 			fmt.Fprint(stdout, markdown)
-		} else if err := os.WriteFile(*markdownPath, []byte(markdown), 0o644); err != nil {
+		} else if err := os.WriteFile(*markdownPath, []byte(markdown), 0o600); err != nil {
 			fmt.Fprintf(stderr, "eval: write markdown: %v\n", err)
 			return 1
 		}
@@ -120,6 +194,14 @@ func evalCommand(ctx context.Context, args []string, stdout, stderr io.Writer) i
 		}
 	}
 	return 0
+}
+
+func joinModes(modes []harness.Mode) string {
+	values := make([]string, 0, len(modes))
+	for _, mode := range modes {
+		values = append(values, string(mode))
+	}
+	return strings.Join(values, ",")
 }
 
 func parseModes(value string) ([]harness.Mode, error) {

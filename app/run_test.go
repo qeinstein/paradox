@@ -10,8 +10,35 @@ import (
 	"github.com/qeinstein/paradox/app"
 	"github.com/qeinstein/paradox/domain/science"
 	"github.com/qeinstein/paradox/harness"
+	"github.com/qeinstein/paradox/provider"
 	"github.com/qeinstein/paradox/runstore"
 )
+
+func TestOpenRouterCapabilitiesRequireAndPreserveExplicitConfiguration(t *testing.T) {
+	model, err := app.BuildProvider(app.ProviderConfig{
+		Name: "openrouter", Model: "vendor/model", APIKey: "fixture-key",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if model.Capabilities().ToolCalls || model.Capabilities().Reasoning || model.Capabilities().StructuredOutput {
+		t.Fatalf("OpenRouter must not guess model capabilities: %+v", model.Capabilities())
+	}
+	model, err = app.BuildProvider(app.ProviderConfig{
+		Name: "openrouter", Model: "vendor/model", APIKey: "fixture-key",
+		OpenRouterToolCallsSupported: true, OpenRouterReasoningSupported: true,
+		OpenRouterStructuredOutputSupported: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := model.Capabilities(); !got.ToolCalls || !got.Reasoning || !got.StructuredOutput {
+		t.Fatalf("explicit OpenRouter capabilities were not retained: %+v", got)
+	}
+	if _, ok := model.(*provider.OpenAIProvider); !ok {
+		t.Fatalf("expected OpenRouter HTTP adapter, got %T", model)
+	}
+}
 
 func TestScienceVerticalSliceModes(t *testing.T) {
 	task := app.DefaultScienceTask()

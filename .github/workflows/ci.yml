@@ -46,8 +46,14 @@ jobs:
       - name: Test with coverage
         run: go test ./... -count=1 -timeout 180s -coverprofile=coverage.txt -covermode=atomic
 
+      - name: Race detector
+        run: go test -race ./... -count=1 -timeout 240s
+
       - name: Build
-        run: go build ./cmd/paradox
+        run: go build -o "$RUNNER_TEMP/paradox" ./cmd/paradox
+
+      - name: Offline provider and runtime preflight
+        run: "$RUNNER_TEMP/paradox" doctor --provider mock --eval-config eval/configs/internal-science-v0.2.json --dry-run --json
 
       - name: Smoke test the scientific slice
         run: |
@@ -56,8 +62,7 @@ jobs:
 
       - name: Smoke test matched evaluation
         run: |
-          go run ./cmd/paradox eval --provider mock --suite science \
-            --modes baseline,evidence,paradox --trials 1 \
+          go run ./cmd/paradox eval --config eval/configs/internal-science-v0.2.json \
             --runs-dir "$RUNNER_TEMP/runs" --output "$RUNNER_TEMP/evals" \
             --markdown "$RUNNER_TEMP/report.md" --json > "$RUNNER_TEMP/report.json"
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/qeinstein/paradox/harness"
@@ -124,5 +125,21 @@ func TestMetaResponsesChainsToolCallsAndUsage(t *testing.T) {
 	toolOutput, _ := inputs[0].(map[string]any)
 	if toolOutput["type"] != "function_call_output" || toolOutput["call_id"] != "call-1" || toolOutput["output"] != `{"ok":true}` {
 		t.Fatalf("unexpected function output item: %+v", toolOutput)
+	}
+}
+
+func TestMetaFailedResponseRedactsCredentialEcho(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"resp-failed","status":"failed","error":{"message":"rejected secret-meta-key"}}`))
+	}))
+	defer server.Close()
+	client := provider.NewOpenAICompatible(provider.OpenAIConfig{
+		Name: "meta", BaseURL: server.URL, APIKey: "secret-meta-key", Model: "muse-fixture",
+	})
+	_, err := client.Complete(context.Background(), &harness.ModelRequest{
+		Model: "muse-fixture", Messages: []harness.Message{{Role: harness.RoleUser, Content: "test"}},
+	})
+	if err == nil || strings.Contains(err.Error(), "secret-meta-key") || !strings.Contains(err.Error(), "[REDACTED]") {
+		t.Fatalf("Meta failure did not safely redact credential: %v", err)
 	}
 }

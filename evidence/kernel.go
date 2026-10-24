@@ -78,45 +78,49 @@ type AssumptionInput struct {
 	Text       string         `json:"text"`
 	Kind       string         `json:"kind,omitempty"`
 	Confidence float64        `json:"confidence,omitempty"`
+	ExpiresAt  int64          `json:"expires_at,omitempty"` // Unix milliseconds; zero means no expiry.
 	Metadata   map[string]any `json:"metadata,omitempty"`
 }
 
 type ClaimInput struct {
-	Text        string            `json:"text"`
-	ClaimKey    string            `json:"claim_key,omitempty"`
-	ClaimValue  string            `json:"claim_value,omitempty"`
-	Subject     string            `json:"subject,omitempty"`
-	Predicate   string            `json:"predicate,omitempty"`
-	Object      string            `json:"object,omitempty"`
-	Polarity    string            `json:"polarity,omitempty"`
-	Confidence  float64           `json:"confidence,omitempty"`
-	EvidenceIDs []string          `json:"evidence_ids,omitempty"`
-	Assumptions []AssumptionInput `json:"assumptions,omitempty"`
-	Metadata    map[string]any    `json:"metadata,omitempty"`
+	Text                   string            `json:"text"`
+	ClaimKey               string            `json:"claim_key,omitempty"`
+	ClaimValue             string            `json:"claim_value,omitempty"`
+	Subject                string            `json:"subject,omitempty"`
+	Predicate              string            `json:"predicate,omitempty"`
+	Object                 string            `json:"object,omitempty"`
+	Polarity               string            `json:"polarity,omitempty"`
+	Confidence             float64           `json:"confidence,omitempty"`
+	EvidenceIDs            []string          `json:"evidence_ids,omitempty"`
+	AlternativeEvidenceIDs [][]string        `json:"alternative_evidence_ids,omitempty"`
+	Assumptions            []AssumptionInput `json:"assumptions,omitempty"`
+	Metadata               map[string]any    `json:"metadata,omitempty"`
 }
 
 type Node struct {
-	ID            string         `json:"id"`
-	Kind          Kind           `json:"kind"`
-	Text          string         `json:"text"`
-	Source        Source         `json:"source,omitempty"`
-	Verification  Verification   `json:"verification"`
-	Epistemic     string         `json:"epistemic,omitempty"`
-	Confidence    float64        `json:"confidence"`
-	Status        float64        `json:"status"`
-	Active        bool           `json:"active"`
-	ClaimKey      string         `json:"claim_key,omitempty"`
-	ClaimValue    string         `json:"claim_value,omitempty"`
-	Subject       string         `json:"subject,omitempty"`
-	Predicate     string         `json:"predicate,omitempty"`
-	Object        string         `json:"object,omitempty"`
-	Metadata      map[string]any `json:"metadata,omitempty"`
-	EvidenceIDs   []string       `json:"evidence_ids,omitempty"`
-	AssumptionIDs []string       `json:"assumption_ids,omitempty"`
-	GuardID       string         `json:"guard_id,omitempty"`
-	Artifacts     []ArtifactRef  `json:"artifacts,omitempty"`
-	Internal      bool           `json:"internal,omitempty"`
-	CreatedAt     int64          `json:"created_at"`
+	ID                     string         `json:"id"`
+	Kind                   Kind           `json:"kind"`
+	Text                   string         `json:"text"`
+	Source                 Source         `json:"source,omitempty"`
+	Verification           Verification   `json:"verification"`
+	Epistemic              string         `json:"epistemic,omitempty"`
+	Confidence             float64        `json:"confidence"`
+	Status                 float64        `json:"status"`
+	Active                 bool           `json:"active"`
+	ClaimKey               string         `json:"claim_key,omitempty"`
+	ClaimValue             string         `json:"claim_value,omitempty"`
+	Subject                string         `json:"subject,omitempty"`
+	Predicate              string         `json:"predicate,omitempty"`
+	Object                 string         `json:"object,omitempty"`
+	Metadata               map[string]any `json:"metadata,omitempty"`
+	EvidenceIDs            []string       `json:"evidence_ids,omitempty"`
+	AlternativeEvidenceIDs [][]string     `json:"alternative_evidence_ids,omitempty"`
+	AssumptionIDs          []string       `json:"assumption_ids,omitempty"`
+	ExpiresAt              int64          `json:"expires_at,omitempty"`
+	GuardID                string         `json:"guard_id,omitempty"`
+	Artifacts              []ArtifactRef  `json:"artifacts,omitempty"`
+	Internal               bool           `json:"internal,omitempty"`
+	CreatedAt              int64          `json:"created_at"`
 }
 
 type Edge struct {
@@ -195,6 +199,11 @@ type ContradictionResult struct {
 	Retracted     []string      `json:"retracted"`
 }
 
+type AssumptionExpiration struct {
+	AssumptionID      string   `json:"assumption_id"`
+	InvalidatedClaims []string `json:"invalidated_claims,omitempty"`
+}
+
 // Kernel is a single run's evidence store. It is safe for concurrent reads and
 // serialized writes; the agent loop writes, the server/UI reads snapshots.
 type Kernel struct {
@@ -232,6 +241,17 @@ func cloneMap(in map[string]any) map[string]any {
 		out[key] = value
 	}
 	return out
+}
+
+func cloneStringGroups(groups [][]string) [][]string {
+	if groups == nil {
+		return nil
+	}
+	cloned := make([][]string, len(groups))
+	for index, group := range groups {
+		cloned[index] = append([]string(nil), group...)
+	}
+	return cloned
 }
 
 func mergeMaps(groups ...map[string]any) map[string]any {
@@ -364,6 +384,9 @@ func (k *Kernel) AddAssumption(in AssumptionInput) (Node, error) {
 		"verification_status": string(Unverified),
 		"epistemic_status":    "explicit_assumption",
 	})
+	if in.ExpiresAt > 0 {
+		metadata["expires_at"] = in.ExpiresAt
+	}
 	payload := k.factPayload(KindAssumption, in.Text, in.Metadata)
 	payload["assumption_kind"] = firstNonEmpty(in.Kind, "unspecified")
 	fact := &core.Fact{
@@ -381,7 +404,8 @@ func (k *Kernel) AddAssumption(in AssumptionInput) (Node, error) {
 		ID: id, Kind: KindAssumption, Text: in.Text, Source: SourceModelAssumption,
 		Verification: Unverified, Epistemic: "explicit_assumption",
 		Confidence: in.Confidence, Status: in.Confidence, Active: true,
-		Metadata: cloneMap(metadata), CreatedAt: time.Now().UnixMilli(),
+		ExpiresAt: in.ExpiresAt,
+		Metadata:  cloneMap(metadata), CreatedAt: time.Now().UnixMilli(),
 	}
 	k.registerNode(node)
 	return node, nil
@@ -397,13 +421,23 @@ func (k *Kernel) SubmitClaim(in ClaimInput) (*ClaimResult, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 
-	for _, evidenceID := range in.EvidenceIDs {
-		node, ok := k.nodes[evidenceID]
-		if !ok {
-			return nil, fmt.Errorf("unknown evidence id %q", evidenceID)
+	allEvidenceGroups := make([][]string, 0, len(in.AlternativeEvidenceIDs)+1)
+	allEvidenceGroups = append(allEvidenceGroups, in.EvidenceIDs)
+	for index, group := range in.AlternativeEvidenceIDs {
+		if len(group) == 0 {
+			return nil, fmt.Errorf("alternative justification %d must cite at least one evidence id", index+1)
 		}
-		if node.Kind != KindObservation && node.Kind != KindClaim {
-			return nil, fmt.Errorf("evidence id %q is %s, not an observation or claim", evidenceID, node.Kind)
+		allEvidenceGroups = append(allEvidenceGroups, group)
+	}
+	for _, group := range allEvidenceGroups {
+		for _, evidenceID := range group {
+			node, ok := k.nodes[evidenceID]
+			if !ok {
+				return nil, fmt.Errorf("unknown evidence id %q", evidenceID)
+			}
+			if node.Kind != KindObservation && node.Kind != KindClaim {
+				return nil, fmt.Errorf("evidence id %q is %s, not an observation or claim", evidenceID, node.Kind)
+			}
 		}
 	}
 
@@ -445,15 +479,28 @@ func (k *Kernel) SubmitClaim(in ClaimInput) (*ClaimResult, error) {
 
 	deps := append([]string{}, in.EvidenceIDs...)
 	deps = append(deps, assumptionIDs...)
+	justificationSets := make([][]string, 0, len(in.AlternativeEvidenceIDs)+1)
+	// A claim with no premises remains an explicit, unsupported model assertion
+	// (guard-only support) for auditability. If alternatives exist without a
+	// primary evidence group, omit that empty set so it cannot mask retraction.
+	if len(deps) > 0 || len(in.AlternativeEvidenceIDs) == 0 {
+		justificationSets = append(justificationSets, append(append([]string{}, deps...), guardID))
+	}
+	for _, alternative := range in.AlternativeEvidenceIDs {
+		alternativeDeps := append([]string{}, alternative...)
+		alternativeDeps = append(alternativeDeps, assumptionIDs...)
+		justificationSets = append(justificationSets, append(alternativeDeps, guardID))
+	}
 	metadata := mergeMaps(in.Metadata, map[string]any{
-		"kind":                string(KindClaim),
-		"source_type":         string(SourceModelInterpretation),
-		"verification_status": string(Unverified),
-		"epistemic_status":    "hypothesis",
-		"evidence_ids":        in.EvidenceIDs,
-		"assumption_ids":      assumptionIDs,
-		"guard_id":            guardID,
-		"confidence_input":    in.Confidence,
+		"kind":                     string(KindClaim),
+		"source_type":              string(SourceModelInterpretation),
+		"verification_status":      string(Unverified),
+		"epistemic_status":         "hypothesis",
+		"evidence_ids":             in.EvidenceIDs,
+		"alternative_evidence_ids": in.AlternativeEvidenceIDs,
+		"assumption_ids":           assumptionIDs,
+		"guard_id":                 guardID,
+		"confidence_input":         in.Confidence,
 	})
 	if len(in.EvidenceIDs) > 0 || len(assumptionIDs) > 0 {
 		metadata["epistemic_status"] = "supported_hypothesis"
@@ -466,6 +513,7 @@ func (k *Kernel) SubmitClaim(in ClaimInput) (*ClaimResult, error) {
 	payload["object"] = in.Object
 	payload["polarity"] = firstNonEmpty(in.Polarity, "positive")
 	payload["evidence_ids"] = in.EvidenceIDs
+	payload["alternative_evidence_ids"] = in.AlternativeEvidenceIDs
 	payload["assumption_ids"] = assumptionIDs
 	payload["guard_id"] = guardID
 	if scope, ok := in.Metadata["scope"]; ok {
@@ -475,7 +523,7 @@ func (k *Kernel) SubmitClaim(in ClaimInput) (*ClaimResult, error) {
 		ID:                claimID,
 		Payload:           payload,
 		Metadata:          mergeMaps(metadata, map[string]any{"_provenance": provenanceMap(SourceModelInterpretation, nil)}),
-		JustificationSets: [][]string{append(deps, guardID)},
+		JustificationSets: justificationSets,
 		AssertionKind:     core.AssertionKindEmpirical,
 	}
 	if err := k.engine.AssertFact(fact); err != nil {
@@ -489,7 +537,8 @@ func (k *Kernel) SubmitClaim(in ClaimInput) (*ClaimResult, error) {
 		ClaimKey: in.ClaimKey, ClaimValue: in.ClaimValue,
 		Subject: in.Subject, Predicate: in.Predicate, Object: in.Object,
 		Metadata: cloneMap(metadata), EvidenceIDs: append([]string(nil), in.EvidenceIDs...),
-		AssumptionIDs: assumptionIDs, GuardID: guardID, CreatedAt: time.Now().UnixMilli(),
+		AlternativeEvidenceIDs: cloneStringGroups(in.AlternativeEvidenceIDs),
+		AssumptionIDs:          assumptionIDs, GuardID: guardID, CreatedAt: time.Now().UnixMilli(),
 	}
 	k.registerNode(node)
 	return &ClaimResult{Claim: node, Assumptions: assumptionNodes, GuardID: guardID}, nil
@@ -511,6 +560,9 @@ func (k *Kernel) addAssumptionLocked(in AssumptionInput) (Node, error) {
 		"verification_status": string(Unverified),
 		"epistemic_status":    "explicit_assumption",
 	})
+	if in.ExpiresAt > 0 {
+		metadata["expires_at"] = in.ExpiresAt
+	}
 	payload := k.factPayload(KindAssumption, in.Text, in.Metadata)
 	payload["assumption_kind"] = firstNonEmpty(in.Kind, "unspecified")
 	fact := &core.Fact{
@@ -528,7 +580,8 @@ func (k *Kernel) addAssumptionLocked(in AssumptionInput) (Node, error) {
 		ID: id, Kind: KindAssumption, Text: in.Text, Source: SourceModelAssumption,
 		Verification: Unverified, Epistemic: "explicit_assumption",
 		Confidence: in.Confidence, Status: in.Confidence, Active: true,
-		Metadata: cloneMap(metadata), CreatedAt: time.Now().UnixMilli(),
+		ExpiresAt: in.ExpiresAt,
+		Metadata:  cloneMap(metadata), CreatedAt: time.Now().UnixMilli(),
 	}
 	k.registerNode(node)
 	return node, nil
@@ -645,6 +698,58 @@ func (k *Kernel) Retract(nodeID, reason, cause string) error {
 	}
 	k.recordRetractionLocked(nodeID, reason, cause, cause != "manual_override")
 	return nil
+}
+
+// ExpireAssumptions retracts active assumptions whose explicit expiry time has
+// passed. It returns only claims that were active before and lost support due
+// to this expiration; independently justified claims remain active.
+func (k *Kernel) ExpireAssumptions(now time.Time) []AssumptionExpiration {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	before := map[string]bool{}
+	for id, node := range k.nodes {
+		if node.Kind == KindClaim {
+			before[id] = k.engine.GetStatus(id) >= 0.6
+		}
+	}
+	expired := []AssumptionExpiration{}
+	for id, node := range k.nodes {
+		if node.Kind != KindAssumption || !node.Active || node.ExpiresAt <= 0 || node.ExpiresAt > now.UnixMilli() {
+			continue
+		}
+		reason := "assumption expired at " + time.UnixMilli(node.ExpiresAt).UTC().Format(time.RFC3339Nano)
+		if err := k.engine.RetractFact(id, reason); err != nil {
+			continue
+		}
+		_ = k.engine.SetFactVerification(id, core.VerificationRejected, "expiration", "", reason, 0)
+		node.Active, node.Status, node.Verification = false, 0, Rejected
+		if node.Metadata == nil {
+			node.Metadata = map[string]any{}
+		}
+		node.Metadata["expired_at"] = now.UnixMilli()
+		k.nodes[id] = node
+		k.recordRetractionLocked(id, reason, "expiration", true)
+		result := AssumptionExpiration{AssumptionID: id}
+		for claimID, wasActive := range before {
+			if !wasActive || k.engine.GetStatus(claimID) >= 0.6 {
+				continue
+			}
+			claim := k.nodes[claimID]
+			for _, assumptionID := range claim.AssumptionIDs {
+				if assumptionID == id {
+					result.InvalidatedClaims = append(result.InvalidatedClaims, claimID)
+					break
+				}
+			}
+		}
+		sort.Strings(result.InvalidatedClaims)
+		for _, claimID := range result.InvalidatedClaims {
+			k.recordRetractionLocked(claimID, "support assumption expired: "+id, "expiration", true)
+		}
+		expired = append(expired, result)
+	}
+	sort.Slice(expired, func(i, j int) bool { return expired[i].AssumptionID < expired[j].AssumptionID })
+	return expired
 }
 
 func (k *Kernel) recordRetractionLocked(nodeID, reason, cause string, correct bool) {
@@ -805,21 +910,34 @@ func computeStats(nodes []Node, contradictions []Contradiction, retractions []Re
 		case KindObservation:
 			result = node.Active
 		case KindClaim:
-			if node.Active && len(node.EvidenceIDs) > 0 {
-				result = true
-				for _, evidenceID := range node.EvidenceIDs {
-					parent, ok := byID[evidenceID]
-					if !ok || !supported(parent) {
-						result = false
+			if node.Active {
+				groups := make([][]string, 0, len(node.AlternativeEvidenceIDs)+1)
+				if len(node.EvidenceIDs) > 0 {
+					groups = append(groups, node.EvidenceIDs)
+				}
+				groups = append(groups, node.AlternativeEvidenceIDs...)
+				assumptionsVerified := true
+				for _, assumptionID := range node.AssumptionIDs {
+					if !verifiedAssumptions[assumptionID] {
+						assumptionsVerified = false
 						break
 					}
 				}
-				if result {
-					for _, assumptionID := range node.AssumptionIDs {
-						if !verifiedAssumptions[assumptionID] {
-							result = false
+				for _, group := range groups {
+					if len(group) == 0 || !assumptionsVerified {
+						continue
+					}
+					justificationSupported := true
+					for _, evidenceID := range group {
+						parent, ok := byID[evidenceID]
+						if !ok || !supported(parent) {
+							justificationSupported = false
 							break
 						}
+					}
+					if justificationSupported {
+						result = true
+						break
 					}
 				}
 			}

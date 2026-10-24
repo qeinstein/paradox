@@ -53,6 +53,14 @@ func TestMatchedScienceComparison(t *testing.T) {
 	if report.Overall.UnsupportedClaims == 0 {
 		t.Fatal("expected baseline/evidence unsupported claims to be counted")
 	}
+	if len(report.Paired) != 4 {
+		t.Fatalf("expected aggregate and task-level paired comparisons for evidence and paradox, got %+v", report.Paired)
+	}
+	for _, paired := range report.Paired {
+		if paired.Pairs != 1 || paired.UncertaintyAvailable {
+			t.Fatalf("single-trial comparisons should be descriptive without uncertainty: %+v", paired)
+		}
+	}
 	if report.Files["json"] == "" || report.Files["md"] == "" {
 		t.Fatal("expected report paths")
 	}

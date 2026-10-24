@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"sync"
+	"time"
 )
 
 type Role string
@@ -71,6 +72,7 @@ type Capabilities struct {
 	Reasoning        bool `json:"reasoning"`
 	Streaming        bool `json:"streaming"`
 	MaxContextTokens int  `json:"max_context_tokens,omitempty"`
+	MinOutputTokens  int  `json:"min_output_tokens,omitempty"`
 }
 
 type ModelInfo struct {
@@ -85,6 +87,19 @@ type ModelProvider interface {
 	Model() string
 	Capabilities() Capabilities
 	Complete(ctx context.Context, req *ModelRequest) (*ModelResponse, error)
+}
+
+// RetryDelayError lets providers communicate server-directed backoff (for
+// example HTTP Retry-After) without coupling the harness to a provider SDK.
+type RetryDelayError interface {
+	error
+	RetryDelay() time.Duration
+}
+
+// SecretRedactor allows a provider to scrub its configured credential from
+// model output and errors before the harness persists events or tool input.
+type SecretRedactor interface {
+	RedactSensitive(string) string
 }
 
 // MockProvider is a deterministic in-process provider for tests and the

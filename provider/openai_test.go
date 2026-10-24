@@ -3,10 +3,12 @@ package provider_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/qeinstein/paradox/harness"
 	"github.com/qeinstein/paradox/provider"
@@ -80,9 +82,13 @@ func TestOpenRouterUsesReasoningObject(t *testing.T) {
 	defer server.Close()
 	client := provider.NewOpenAICompatible(provider.OpenAIConfig{
 		Name: "openrouter", BaseURL: server.URL, APIKey: "k", Model: "x", ReasoningParam: "reasoning",
+		Capabilities: harness.Capabilities{Reasoning: true},
 	})
-	if _, err := client.Complete(context.Background(), &harness.ModelRequest{Model: "x", ReasoningEffort: "medium"}); err != nil {
+	if _, err := client.Complete(context.Background(), &harness.ModelRequest{Model: "x", ReasoningEffort: "medium", MaxTokens: 123}); err != nil {
 		t.Fatal(err)
+	}
+	if received["max_completion_tokens"] != float64(123) || received["max_tokens"] != nil {
+		t.Fatalf("OpenRouter must use its documented max_completion_tokens field: %+v", received)
 	}
 	reasoning, _ := received["reasoning"].(map[string]any)
 	if reasoning["effort"] != "medium" {
@@ -91,9 +97,63 @@ func TestOpenRouterUsesReasoningObject(t *testing.T) {
 	if _, exists := received["reasoning_effort"]; exists {
 		t.Fatalf("unexpected top-level reasoning_effort: %+v", received)
 	}
-	usage, _ := received["usage"].(map[string]any)
-	if usage["include"] != true {
-		t.Fatalf("OpenRouter usage reporting was not requested: %+v", received)
+	if _, exists := received["usage"]; exists {
+		t.Fatalf("non-streaming request should not send undocumented usage configuration: %+v", received)
+	}
+}
+
+func TestOpenRouterToolCallsRequireExplicitModelCapability(t *testing.T) {
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		_, _ = w.Write([]byte(`{"model":"x","choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}]}`))
+	}))
+	defer server.Close()
+	request := &harness.ModelRequest{Model: "x", Tools: []harness.ToolDef{{Name: "step", Parameters: json.RawMessage(`{"type":"object"}`)}}}
+	withoutCapability := provider.NewOpenAICompatible(provider.OpenAIConfig{
+		Name: "openrouter", BaseURL: server.URL, APIKey: "fixture", Model: "x",
+	})
+	if _, err := withoutCapability.Complete(context.Background(), request); err == nil || !strings.Contains(err.Error(), "model-specific") {
+		t.Fatalf("unconfirmed model tool support should fail clearly before network: %v", err)
+	}
+	if requests != 0 {
+		t.Fatalf("unsupported capability check should not make request: %d", requests)
+	}
+	configured := provider.NewOpenRouterWithCapabilities("fixture", "x", harness.Capabilities{ToolCalls: true}, 0, 0)
+	if !configured.Capabilities().ToolCalls {
+		t.Fatal("explicit OpenRouter capability was not retained")
+	}
+	// Use a local endpoint while retaining the same capability behavior.
+	withCapability := provider.NewOpenAICompatible(provider.OpenAIConfig{
+		Name: "openrouter", BaseURL: server.URL, APIKey: "fixture", Model: "x",
+		Capabilities: harness.Capabilities{ToolCalls: true},
+	})
+	if _, err := withCapability.Complete(context.Background(), request); err != nil {
+		t.Fatalf("confirmed model tool support should permit request: %v", err)
+	}
+	if requests != 1 {
+		t.Fatalf("expected one permitted request, got %d", requests)
+	}
+}
+
+func TestOpenAICompatiblePreservesMultipleToolCallsAndMissingUsage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"multi","choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":null,"tool_calls":[
+			{"id":"call-a","type":"function","function":{"name":"one","arguments":"not-json"}},
+			{"id":"call-b","type":"function","function":{"name":"two","arguments":"{}"}}
+		]}}]}`))
+	}))
+	defer server.Close()
+	client := provider.NewOpenAICompatible(provider.OpenAIConfig{Name: "test", BaseURL: server.URL, APIKey: "fixture", Model: "x"})
+	response, err := client.Complete(context.Background(), &harness.ModelRequest{Model: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(response.ToolCalls) != 2 || response.ToolCalls[0].ID != "call-a" || response.ToolCalls[1].ID != "call-b" {
+		t.Fatalf("tool call ordering/IDs changed: %+v", response.ToolCalls)
+	}
+	if response.ToolCalls[0].Arguments != "not-json" || response.Usage.TotalTokens != 0 || response.Usage.CostAvailable {
+		t.Fatalf("provider should preserve malformed arguments and mark omitted usage unavailable: %+v", response)
 	}
 }
 
@@ -120,7 +180,7 @@ func TestConfiguredPricesProvideCostAccounting(t *testing.T) {
 
 func TestProviderErrorDoesNotLeakKey(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "upstream rejected request", http.StatusBadRequest)
+		http.Error(w, "upstream rejected Bearer super-secret-key", http.StatusBadRequest)
 	}))
 	defer server.Close()
 	client := provider.NewOpenAICompatible(provider.OpenAIConfig{
@@ -132,6 +192,47 @@ func TestProviderErrorDoesNotLeakKey(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "super-secret-key") {
 		t.Fatal("error leaked API key")
+	}
+	if !strings.Contains(err.Error(), "[REDACTED]") {
+		t.Fatalf("expected redacted response body, got %v", err)
+	}
+}
+
+func TestHTTPStatusErrorCarriesRetryAfter(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "2")
+		http.Error(w, `{"error":"rate limit"}`, http.StatusTooManyRequests)
+	}))
+	defer server.Close()
+	client := provider.NewOpenAICompatible(provider.OpenAIConfig{Name: "openrouter", BaseURL: server.URL, APIKey: "key", Model: "x"})
+	_, err := client.Complete(context.Background(), &harness.ModelRequest{Model: "x"})
+	var statusErr *provider.HTTPStatusError
+	if !errors.As(err, &statusErr) {
+		t.Fatalf("expected provider HTTP status error, got %v", err)
+	}
+	if statusErr.StatusCode != http.StatusTooManyRequests || statusErr.RetryDelay() != 2*time.Second {
+		t.Fatalf("status or Retry-After missing: %+v", statusErr)
+	}
+}
+
+func TestProviderInferenceHonorsCancellation(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Some transports do not cancel the server request context immediately
+		// after the client deadline. Respond after the client has already timed
+		// out so the fixture server itself always shuts down deterministically.
+		time.Sleep(250 * time.Millisecond)
+		_, _ = w.Write([]byte(`{"model":"x","choices":[{"message":{"role":"assistant","content":"late"}}]}`))
+	}))
+	defer server.Close()
+	client := provider.NewOpenAICompatible(provider.OpenAIConfig{
+		Name: "openrouter", BaseURL: server.URL, APIKey: "fixture-key", Model: "vendor/model",
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err := client.Complete(ctx, &harness.ModelRequest{Model: "vendor/model"})
+	if err == nil || ctx.Err() == nil || time.Since(started) > time.Second {
+		t.Fatalf("provider request did not stop promptly on cancellation: err=%v elapsed=%s", err, time.Since(started))
 	}
 }
 

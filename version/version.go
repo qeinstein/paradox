@@ -8,7 +8,7 @@ import (
 
 // Version is the semantic version of this source tree. Release builds may
 // override it with -ldflags "-X github.com/qeinstein/paradox/version.Version=...".
-var Version = "0.1.0"
+var Version = "0.2.0"
 
 // Commit is the source revision. It is populated by release builds when
 // available and falls back to Go's embedded VCS metadata.

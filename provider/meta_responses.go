@@ -67,6 +67,34 @@ type metaResponseFormat struct {
 }
 
 func (p *OpenAIProvider) completeMetaResponses(ctx context.Context, req *harness.ModelRequest) (*harness.ModelResponse, error) {
+	body, err := p.buildMetaRequest(req)
+	if err != nil {
+		return nil, err
+	}
+	endpoint := strings.TrimRight(p.cfg.BaseURL, "/") + "/responses"
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+p.cfg.APIKey)
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "application/json")
+	response, err := p.client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("meta request failed: %w", err)
+	}
+	defer response.Body.Close()
+	responseBody, err := io.ReadAll(io.LimitReader(response.Body, 8<<20))
+	if err != nil {
+		return nil, err
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, newHTTPStatusError("meta", response, responseBody, p.cfg.APIKey)
+	}
+	return p.parseMetaResponse(responseBody, len(req.Messages))
+}
+
+func (p *OpenAIProvider) buildMetaRequest(req *harness.ModelRequest) ([]byte, error) {
 	state := metaResponseState{}
 	if req.ProviderState != "" {
 		if err := json.Unmarshal([]byte(req.ProviderState), &state); err != nil {
@@ -115,28 +143,7 @@ func (p *OpenAIProvider) completeMetaResponses(ctx context.Context, req *harness
 	if err != nil {
 		return nil, fmt.Errorf("encode Meta Responses request: %w", err)
 	}
-	endpoint := strings.TrimRight(p.cfg.BaseURL, "/") + "/responses"
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	httpReq.Header.Set("Authorization", "Bearer "+p.cfg.APIKey)
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Accept", "application/json")
-	response, err := p.client.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("meta request failed: %w", err)
-	}
-	defer response.Body.Close()
-	responseBody, err := io.ReadAll(io.LimitReader(response.Body, 8<<20))
-	if err != nil {
-		return nil, err
-	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		message := strings.ReplaceAll(string(responseBody), p.cfg.APIKey, "[REDACTED]")
-		return nil, fmt.Errorf("meta HTTP %d: %s", response.StatusCode, truncateString(message, 800))
-	}
-	return p.parseMetaResponse(responseBody, len(req.Messages))
+	return body, nil
 }
 
 func metaResponseInputs(messages []harness.Message) ([]metaResponseInput, error) {
@@ -211,7 +218,7 @@ func (p *OpenAIProvider) parseMetaResponse(body []byte, messageCount int) (*harn
 	}
 	if parsed.Status == "failed" {
 		if parsed.Error != nil && parsed.Error.Message != "" {
-			return nil, fmt.Errorf("Meta response failed: %s", truncateString(parsed.Error.Message, 800))
+			return nil, fmt.Errorf("Meta response failed: %s", truncateString(redactSecret(parsed.Error.Message, p.cfg.APIKey), 800))
 		}
 		return nil, errors.New("Meta response failed")
 	}

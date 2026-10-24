@@ -9,7 +9,9 @@ PARADOX separates a domain-independent runtime from domain-specific tools, verif
 | `core/` | Preserved symbolic truth-maintenance engine: facts, justification sets, negated dependencies, invalidation, dominator pruning, consistency checks, explanations. No external dependencies. |
 | `evidence/` | Typed epistemic layer: observations, assumptions, claims, guards, contradictions, retractions, verification records, snapshots, statistics. |
 | `harness/` | Provider and tool interfaces, budgets, bounded execution loop, retries, cancellation, event recording, active verification orchestration, replan messages. |
-| `domain/science/` | Science domain adapter, fixed primality experiment, verification plans, domain evaluation, deterministic mock provider. |
+| `domain/science/` | Task-scoped scientific operations, fixed primality regression, statistical test, integer optimization, measurement stability/replication falsification, and deterministic mock provider. |
+| `domain/software/` | Small test-driven change/retest fixture proving the evidence contract is not science-specific. |
+| `benchmark/scienceworld/` | Process-isolated bridge and adapter for the official Python/Java ScienceWorld environment, official score/reward capture, variation metadata, and episode artifacts. |
 | `provider/` | Meta Responses API, OpenRouter/OpenAI-compatible adapters, custom endpoints, model catalogs, and usage/cost parsing. |
 | `app/` | Composition root used by the CLI, HTTP server, and evaluator. |
 | `eval/` | Matched cross-mode evaluation, metrics, JSON/Markdown reports. |
@@ -56,6 +58,8 @@ A claim is a derived fact. Its justification set contains:
 
 The guard is a positive root representing "this claim has not been contradicted." Using a positive guard rather than a negated internal root avoids the kernel's dominator pruning treating the guard as an invalid ancestor at assertion time.
 
+Claims may carry alternative evidence groups. Evidence and assumptions within one group are conjunctive; groups are disjunctive. Losing one supporting group does not retract a claim while another complete justification remains active. The evidence facade validates referenced nodes before sending justifications to `core/`.
+
 When a contradiction occurs:
 
 1. The failed assumption is retracted and marked rejected.
@@ -96,7 +100,7 @@ A claim is supported only if it is active, cites at least one observation or cla
 - `evidence`: dependency tracking and consistency checks; no generated falsification plans.
 - `paradox`: evidence tracking plus active verification, contradiction handling, retraction, and replanning.
 
-The mode changes orchestration, not the model. The same provider can be used in every mode, which makes matched comparisons possible.
+Modes use the same provider, task, and tools, with mode-specific system instructions describing the enabled harness mechanisms. The provider/model itself is unchanged.
 
 ## Domain adapter contract
 
@@ -112,6 +116,8 @@ type DomainAdapter interface {
 ```
 
 A software-engineering adapter can implement the same contract with tests, type checks, linters, reproductions, and failing-test evidence. The harness imports no domain concepts.
+
+`TaskToolAdapter` optionally scopes tools to a task. This lets science expose predefined experiments and ScienceWorld expose its environment-action tool without keeping task configuration in the harness. The ScienceWorld bridge starts the official package, loads the requested task and variation, resets it, forwards actions to `step`, and returns official observations, rewards, scores, and completion state. Model-visible tool output contains the environment response and valid actions; official scoring is evaluated by the adapter. The integration limits actions, steps, output, process resources, and episode-artifact size. Its smoke test runs only when the official Python package and Java runtime are installed.
 
 ## Persistence
 
@@ -154,5 +160,8 @@ The Meta adapter chains Responses API IDs across tool turns. The opaque provider
 
 - The evidence kernel is monotonic in its handling of explicit observations; contradiction is expressed by retracting a guard or premise, not by mutating observations.
 - The science subprocess applies CPU, memory, file-descriptor, wall-clock, and output bounds and accepts only a fixed expression grammar. It is still not a hardened security sandbox.
+- ScienceWorld is not marked operational unless the official environment smoke test executes. Its evaluation requires an explicit official task and variation and does not add reference answers to the agent prompt.
+- Internal statistical, optimization, and measurement tasks are development fixtures, not held-out benchmark results.
+- OpenRouter tool support is selected per model. CLI users must explicitly confirm tool support after checking the provider catalog; the adapter's generic tool schema does not imply model capability.
 - The mock provider exists to test the harness and is not a model-quality benchmark.
 - The dashboard displays persisted data; it does not infer missing values.

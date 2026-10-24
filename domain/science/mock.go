@@ -26,6 +26,22 @@ type mockToolPayload struct {
 }
 
 func mockStep(req *harness.ModelRequest) (*harness.ModelResponse, error) {
+	if isPrimalityPrompt(req) {
+		return mockPrimalityStep(req)
+	}
+	return mockResearchStep(req)
+}
+
+func isPrimalityPrompt(req *harness.ModelRequest) bool {
+	for _, message := range req.Messages {
+		if message.Role == harness.RoleUser && strings.Contains(message.Content, "f(n)=n^2+n+41") {
+			return true
+		}
+	}
+	return false
+}
+
+func mockPrimalityStep(req *harness.ModelRequest) (*harness.ModelResponse, error) {
 	payloads := mockPayloads(req)
 	invalidated := mockInvalidated(req)
 	hasUniversal := mockHasClaim(req, func(args map[string]any) bool {
@@ -133,6 +149,174 @@ func mockStep(req *harness.ModelRequest) (*harness.ModelResponse, error) {
 	return mockToolResponse("finish", map[string]any{
 		"conclusion": "For every integer n in [0,100], f(n)=n^2+n+41 is prime, based on the experiment over [0,39].",
 	}), nil
+}
+
+// mockResearchStep is an offline protocol fixture for the general computational
+// tasks. It discovers the permitted operation and dataset from the request's
+// tool schema, then grounds its claims in returned evidence. It does not read
+// task evaluator metadata or supply reference answers to the scorer.
+func mockResearchStep(req *harness.ModelRequest) (*harness.ModelResponse, error) {
+	experiment, dataset, ok := permittedExperiment(req.Tools)
+	if !ok {
+		return nil, fmt.Errorf("mock: request has no permitted experiment tool")
+	}
+	payloads := mockPayloads(req)
+	var pilot, replication, primary *mockToolPayload
+	for index := range payloads {
+		payload := &payloads[index]
+		if payload.Name != "run_experiment" || stringValue(payload.Result["experiment"]) != experiment {
+			continue
+		}
+		if experiment == "collect_measurements" {
+			switch stringValue(payload.Result["batch"]) {
+			case "pilot":
+				pilot = payload
+			case "replication":
+				replication = payload
+			}
+		} else if primary == nil {
+			primary = payload
+		}
+	}
+
+	if experiment == "collect_measurements" {
+		if pilot == nil {
+			return mockToolResponse("run_experiment", map[string]any{
+				"experiment": experiment, "dataset": dataset, "batch": "pilot",
+			}), nil
+		}
+		if !mockHasClaim(req, func(args map[string]any) bool {
+			return stringValue(args["claim_key"]) == "measurement:"+dataset && stringValue(args["claim_value"]) == "stable"
+		}) {
+			evidenceID := firstEvidence(pilot)
+			if evidenceID == "" {
+				return nil, fmt.Errorf("mock: pilot result has no evidence id")
+			}
+			return mockToolResponse("submit_claim", map[string]any{
+				"text":      "The pilot measurements are within tolerance; provisionally the sensor is stable.",
+				"claim_key": "measurement:" + dataset, "claim_value": "stable",
+				"subject": dataset, "predicate": "stable_across_runs", "object": "stable",
+				"confidence": 0.75, "evidence_ids": []string{evidenceID},
+				"assumptions": []map[string]any{{
+					"text": "The pilot batch is representative of subsequent measurements.",
+					"kind": "measurement_stability", "confidence": 0.75,
+					"metadata": map[string]any{"assumption_kind": "measurement_stability"},
+				}},
+			}), nil
+		}
+		if replication == nil && !mockInvalidated(req) {
+			return mockToolResponse("run_experiment", map[string]any{
+				"experiment": experiment, "dataset": dataset, "batch": "replication",
+			}), nil
+		}
+		evidenceID := ""
+		if replication != nil {
+			evidenceID = firstEvidence(replication)
+		}
+		if evidenceID == "" {
+			evidenceID = invalidationEvidence(req)
+		}
+		if evidenceID == "" {
+			return nil, fmt.Errorf("mock: no evidence available for measurement replan")
+		}
+		if !mockHasClaim(req, func(args map[string]any) bool {
+			return stringValue(args["claim_key"]) == "measurement:"+dataset && stringValue(args["claim_value"]) == "drift_detected"
+		}) {
+			return mockToolResponse("submit_claim", map[string]any{
+				"text":      "The independent replication batch contradicts the stability assumption and shows drift.",
+				"claim_key": "measurement:" + dataset, "claim_value": "drift_detected",
+				"subject": dataset, "predicate": "stable_across_runs", "object": "drift_detected",
+				"confidence": 0.95, "evidence_ids": []string{evidenceID},
+			}), nil
+		}
+		return mockToolResponse("finish", map[string]any{
+			"conclusion": "The independent measurement batch showed drift; the pilot stability assumption did not hold.",
+		}), nil
+	}
+
+	if primary == nil {
+		return mockToolResponse("run_experiment", map[string]any{
+			"experiment": experiment, "dataset": dataset,
+		}), nil
+	}
+	evidenceID := firstEvidence(primary)
+	if evidenceID == "" {
+		return nil, fmt.Errorf("mock: experiment result has no evidence id")
+	}
+	claimKey, claimValue, text := claimFromMeasurement(experiment, dataset, primary.Result)
+	if claimKey == "" || claimValue == "" {
+		return nil, fmt.Errorf("mock: cannot derive a claim from experiment %q output", experiment)
+	}
+	if !mockHasClaim(req, func(args map[string]any) bool {
+		return stringValue(args["claim_key"]) == claimKey && stringValue(args["claim_value"]) == claimValue
+	}) {
+		return mockToolResponse("submit_claim", map[string]any{
+			"text": text, "claim_key": claimKey, "claim_value": claimValue,
+			"subject": dataset, "predicate": experiment, "object": claimValue,
+			"confidence": 0.95, "evidence_ids": []string{evidenceID},
+		}), nil
+	}
+	return mockToolResponse("finish", map[string]any{"conclusion": text}), nil
+}
+
+func permittedExperiment(tools []harness.ToolDef) (string, string, bool) {
+	for _, tool := range tools {
+		if tool.Name != "run_experiment" {
+			continue
+		}
+		var schema struct {
+			Properties map[string]struct {
+				Enum []any `json:"enum"`
+			} `json:"properties"`
+		}
+		if err := json.Unmarshal(tool.Parameters, &schema); err != nil {
+			return "", "", false
+		}
+		if len(schema.Properties["experiment"].Enum) == 0 || len(schema.Properties["dataset"].Enum) == 0 {
+			return "", "", false
+		}
+		experiment := stringValue(schema.Properties["experiment"].Enum[0])
+		dataset := stringValue(schema.Properties["dataset"].Enum[0])
+		return experiment, dataset, experiment != "" && dataset != ""
+	}
+	return "", "", false
+}
+
+func claimFromMeasurement(experiment, dataset string, result map[string]any) (string, string, string) {
+	switch experiment {
+	case "exact_permutation_test":
+		value := "no_significant_difference"
+		if result["significant"] == true {
+			value = "significant_difference"
+		}
+		return "stats:" + dataset, value, fmt.Sprintf("The exact permutation test reports p=%v; the result is %s.", result["p_value"], value)
+	case "integer_optimization":
+		x, xOK := numberAsInt(result["minimizer"])
+		y, yOK := numberAsInt(result["minimum"])
+		if !xOK || !yOK {
+			return "", "", ""
+		}
+		value := fmt.Sprintf("x=%d;value=%d", x, y)
+		return "optimization:" + dataset, value, fmt.Sprintf("The exhaustive search found x=%d with objective value %d.", x, y)
+	default:
+		return "", "", ""
+	}
+}
+
+func numberAsInt(value any) (int, bool) {
+	switch typed := value.(type) {
+	case int:
+		return typed, true
+	case int64:
+		return int(typed), true
+	case float64:
+		return int(typed), typed == float64(int(typed))
+	case json.Number:
+		parsed, err := typed.Int64()
+		return int(parsed), err == nil
+	default:
+		return 0, false
+	}
 }
 
 func mockPayloads(req *harness.ModelRequest) []mockToolPayload {
@@ -282,7 +466,6 @@ func mockMultiToolResponse(name string, args []map[string]any) *harness.ModelRes
 		ToolCalls: calls, FinishReason: "tool_calls",
 		Usage: harness.Usage{
 			PromptTokens: 120, CompletionTokens: 30, TotalTokens: 150,
-			CostUSD: 0.0001, CostAvailable: true,
 		},
 	}
 }

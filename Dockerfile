@@ -6,7 +6,7 @@ WORKDIR /src
 COPY go.mod ./
 COPY . .
 
-ARG VERSION=0.1.0
+ARG VERSION=0.2.0
 ARG COMMIT=
 RUN CGO_ENABLED=0 go build -trimpath \
     -ldflags "-s -w -X github.com/qeinstein/paradox/version.Version=${VERSION} -X github.com/qeinstein/paradox/version.Commit=${COMMIT}" \

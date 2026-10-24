@@ -22,16 +22,19 @@ import (
 )
 
 type startRunRequest struct {
-	Task            *harness.Task               `json:"task,omitempty"`
-	TaskID          string                      `json:"task_id,omitempty"`
-	Mode            string                      `json:"mode,omitempty"`
-	Provider        string                      `json:"provider,omitempty"`
-	Model           string                      `json:"model,omitempty"`
-	Budget          *harness.Budget             `json:"budget,omitempty"`
-	Verification    *harness.VerificationPolicy `json:"verification,omitempty"`
-	ReasoningEffort string                      `json:"reasoning_effort,omitempty"`
-	Temperature     *float64                    `json:"temperature,omitempty"`
-	RunID           string                      `json:"run_id,omitempty"`
+	Task                                *harness.Task               `json:"task,omitempty"`
+	TaskID                              string                      `json:"task_id,omitempty"`
+	Mode                                string                      `json:"mode,omitempty"`
+	Provider                            string                      `json:"provider,omitempty"`
+	Model                               string                      `json:"model,omitempty"`
+	OpenRouterToolCallsSupported        bool                        `json:"openrouter_tool_calls_supported,omitempty"`
+	OpenRouterReasoningSupported        bool                        `json:"openrouter_reasoning_supported,omitempty"`
+	OpenRouterStructuredOutputSupported bool                        `json:"openrouter_structured_output_supported,omitempty"`
+	Budget                              *harness.Budget             `json:"budget,omitempty"`
+	Verification                        *harness.VerificationPolicy `json:"verification,omitempty"`
+	ReasoningEffort                     string                      `json:"reasoning_effort,omitempty"`
+	Temperature                         *float64                    `json:"temperature,omitempty"`
+	RunID                               string                      `json:"run_id,omitempty"`
 }
 
 type runListItem struct {
@@ -143,9 +146,12 @@ func (s *Server) handleStartRun(w http.ResponseWriter, r *http.Request) {
 	modelName := firstNonEmpty(request.Model, defaultModelName(providerName))
 	cfg := app.ProviderConfig{
 		Name: providerName, Model: modelName, APIKey: providerKey(providerName),
-		BaseURL:               os.Getenv("PARADOX_BASE_URL"),
-		InputPricePerMillion:  envFloat("PARADOX_INPUT_PRICE_PER_MILLION"),
-		OutputPricePerMillion: envFloat("PARADOX_OUTPUT_PRICE_PER_MILLION"),
+		BaseURL:                             os.Getenv("PARADOX_BASE_URL"),
+		InputPricePerMillion:                envFloat("PARADOX_INPUT_PRICE_PER_MILLION"),
+		OutputPricePerMillion:               envFloat("PARADOX_OUTPUT_PRICE_PER_MILLION"),
+		OpenRouterToolCallsSupported:        request.OpenRouterToolCallsSupported,
+		OpenRouterReasoningSupported:        request.OpenRouterReasoningSupported,
+		OpenRouterStructuredOutputSupported: request.OpenRouterStructuredOutputSupported,
 	}
 	modelProvider, err := s.cfg.ProviderFactory(cfg)
 	if err != nil {

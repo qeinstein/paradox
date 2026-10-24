@@ -19,10 +19,9 @@ const (
 )
 
 type Adapter struct {
-	expression string
 }
 
-func New() *Adapter { return &Adapter{expression: "n*n+n+41"} }
+func New() *Adapter { return &Adapter{} }
 
 func (a *Adapter) Name() string { return DomainName }
 
@@ -30,24 +29,30 @@ func (a *Adapter) Init(ctx context.Context, task harness.Task) (*harness.DomainC
 	if task.Domain != "" && task.Domain != DomainName {
 		return nil, fmt.Errorf("science adapter cannot run domain %q", task.Domain)
 	}
+	expression := "n*n+n+41"
 	if value, ok := task.Metadata["expression"].(string); ok && strings.TrimSpace(value) != "" {
-		a.expression = strings.TrimSpace(value)
+		expression = strings.TrimSpace(value)
 	}
+	instructions := scienceInstructions(task.ID, expression)
 	return &harness.DomainContext{
-		Instructions: fmt.Sprintf(
-			"You are investigating the integer polynomial f(n) = %s. "+
-				"Use run_experiment to execute a deterministic primality scan. "+
-				"Report the tested range, the number of primes and composites, and any counterexample. "+
-				"Never state that a range was tested unless the tool result says so. "+
-				"When a conclusion covers a wider range than the evidence, make that scope assumption explicit.",
-			a.expression,
-		),
-		Metadata: map[string]any{"expression": a.expression},
+		Instructions: instructions,
+		Metadata:     map[string]any{"expression": expression},
 	}, nil
 }
 
 func (a *Adapter) Tools() []harness.Tool {
 	return []harness.Tool{primalityScanTool()}
+}
+
+func (a *Adapter) ToolsForTask(task harness.Task) []harness.Tool {
+	if task.ID == "" || task.ID == TaskPrimality {
+		expression := "n*n+n+41"
+		if value, ok := task.Metadata["expression"].(string); ok && strings.TrimSpace(value) != "" {
+			expression = strings.TrimSpace(value)
+		}
+		return []harness.Tool{primalityScanToolWithDefault(expression)}
+	}
+	return []harness.Tool{taskExperimentTool(task.ID)}
 }
 
 func (a *Adapter) VerificationPlans(ctx context.Context, claim evidence.Node, snapshot evidence.Snapshot, policy harness.VerificationPolicy) ([]harness.VerificationPlan, error) {
@@ -61,7 +66,7 @@ func (a *Adapter) VerificationPlans(ctx context.Context, claim evidence.Node, sn
 	plans := []harness.VerificationPlan{}
 	for _, assumptionID := range claim.AssumptionIDs {
 		assumption, ok := assumptions[assumptionID]
-		if !ok || assumption.Kind != evidence.KindAssumption || !assumption.Active {
+		if !ok || assumption.Kind != evidence.KindAssumption || !assumption.Active || assumption.Verification == evidence.Verified {
 			continue
 		}
 		if policy.MinAssumptionConfidence > 0 && assumption.Confidence > policy.MinAssumptionConfidence {
@@ -74,6 +79,18 @@ func (a *Adapter) VerificationPlans(ctx context.Context, claim evidence.Node, sn
 		kind, _ := metadata["assumption_kind"].(string)
 		if kind == "" {
 			kind, _ = metadata["kind"].(string)
+		}
+		if kind == "measurement_stability" && aTaskSupportsMeasurement(claim, snapshot) {
+			plans = append(plans, harness.VerificationPlan{
+				ID:      "measurement-repeat-" + claim.ID + "-" + assumptionID,
+				ClaimID: claim.ID, AssumptionID: assumptionID,
+				Rationale: "Check the stationarity assumption with the independent replication batch.",
+				Tool:      "run_experiment", Args: map[string]any{
+					"experiment": "collect_measurements", "dataset": "sensor-stability-v1", "batch": "replication",
+				},
+				Check: "measurement_stability", Metadata: map[string]any{"pilot_batch": "pilot", "tolerance": 0.5},
+			})
+			continue
 		}
 		if kind != "range_representativeness" {
 			continue
@@ -90,7 +107,7 @@ func (a *Adapter) VerificationPlans(ctx context.Context, claim evidence.Node, sn
 		}
 		expression, _ := metadata["expression"].(string)
 		if expression == "" {
-			expression = a.expression
+			expression = "n*n+n+41"
 		}
 		plans = append(plans, harness.VerificationPlan{
 			ID:      "vplan-" + claim.ID + "-" + assumptionID,
@@ -127,9 +144,49 @@ func number(value any) (int, bool) {
 	}
 }
 
+func numberFloat(value any) (float64, bool) {
+	switch typed := value.(type) {
+	case int:
+		return float64(typed), true
+	case int64:
+		return float64(typed), true
+	case float64:
+		return typed, true
+	case json.Number:
+		parsed, err := typed.Float64()
+		return parsed, err == nil
+	default:
+		return 0, false
+	}
+}
+
 func (a *Adapter) EvaluateVerification(ctx context.Context, plan harness.VerificationPlan, result *harness.ToolResult, snapshot evidence.Snapshot) (*harness.VerificationOutcome, error) {
 	if result == nil || result.Data == nil {
 		return nil, fmt.Errorf("verification produced no data")
+	}
+	if plan.Check == "measurement_stability" {
+		pilotMean := 20.0
+		for _, node := range snapshot.Nodes {
+			if node.Kind == evidence.KindObservation && node.ClaimKey == "measurement:sensor-stability-v1:pilot" {
+				if value, ok := numberFloat(node.Metadata["mean"]); ok {
+					pilotMean = value
+				}
+			}
+		}
+		replicationMean, ok := numberFloat(result.Data["mean"])
+		if !ok {
+			return nil, fmt.Errorf("replication result is missing a numeric mean")
+		}
+		if result.Data["batch"] != "replication" {
+			return nil, fmt.Errorf("verification requires the replication batch")
+		}
+		difference := replicationMean - pilotMean
+		return &harness.VerificationOutcome{
+			Contradicted: difference > 0.5 || difference < -0.5,
+			AssumptionID: plan.AssumptionID,
+			Reason:       fmt.Sprintf("replication mean %.3f differs from pilot mean %.3f by %.3f (tolerance 0.5)", replicationMean, pilotMean, difference),
+			Method:       plan.Check,
+		}, nil
 	}
 	if plan.Check != "range_exhaustive_counterexample" {
 		return &harness.VerificationOutcome{Reason: "unknown verification check"}, nil
@@ -151,6 +208,15 @@ func (a *Adapter) EvaluateVerification(ctx context.Context, plan harness.Verific
 }
 
 func (a *Adapter) Evaluate(ctx context.Context, in harness.EvaluationInput) (*harness.Evaluation, error) {
+	switch in.Task.ID {
+	case TaskPermutationTest, TaskOptimization, TaskMeasurement:
+		return evaluateResearchTask(in)
+	default:
+		return a.evaluatePrimality(ctx, in)
+	}
+}
+
+func (a *Adapter) evaluatePrimality(ctx context.Context, in harness.EvaluationInput) (*harness.Evaluation, error) {
 	spec := map[string]any{}
 	if raw, ok := in.Task.Metadata["evaluation"].(map[string]any); ok {
 		spec = raw
@@ -240,6 +306,34 @@ func (a *Adapter) Evaluate(ctx context.Context, in harness.EvaluationInput) (*ha
 			"claim_key":                    expectedKey,
 		},
 	}, nil
+}
+
+func scienceInstructions(taskID, expression string) string {
+	switch taskID {
+	case TaskPermutationTest:
+		return "Use the task-scoped exact permutation experiment. Treat its data and computed p-value as observations; your interpretation must cite its evidence ID. Do not invent samples or calculations."
+	case TaskOptimization:
+		return "Use the task-scoped exhaustive integer optimization experiment. Report the returned minimizer and objective value, and cite the experiment evidence in your claim."
+	case TaskMeasurement:
+		return "Use the pilot measurement experiment before concluding. Make measurement stability an explicit assumption when you infer it. The harness may run the independent replication batch to challenge that assumption; revise if it contradicts the pilot."
+	default:
+		return fmt.Sprintf(
+			"You are investigating the integer polynomial f(n) = %s. Use run_experiment to execute a deterministic primality scan. Report the tested range, number of primes and composites, and any counterexample. Never state that a range was tested unless the tool result says so. Make any extrapolation assumption explicit.",
+			expression,
+		)
+	}
+}
+
+func aTaskSupportsMeasurement(claim evidence.Node, snapshot evidence.Snapshot) bool {
+	if claim.ClaimKey != "measurement:sensor-stability-v1" {
+		return false
+	}
+	for _, node := range snapshot.Nodes {
+		if node.Kind == evidence.KindObservation && node.ClaimKey == "measurement:sensor-stability-v1:pilot" {
+			return true
+		}
+	}
+	return false
 }
 
 func formatCounterexample(value any) string {

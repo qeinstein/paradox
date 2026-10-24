@@ -212,6 +212,13 @@ type DomainAdapter interface {
 	Evaluate(ctx context.Context, in EvaluationInput) (*Evaluation, error)
 }
 
+// TaskToolAdapter optionally provides task-scoped tools. Domain adapters use
+// this when experiments or actions differ by task, without keeping mutable
+// per-run state on a shared adapter instance.
+type TaskToolAdapter interface {
+	ToolsForTask(task Task) []Tool
+}
+
 type Event struct {
 	Seq   int64          `json:"seq"`
 	RunID string         `json:"run_id"`

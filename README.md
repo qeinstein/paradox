@@ -4,7 +4,7 @@
 
 PARADOX runs bounded agent loops against real tools, records typed evidence and explicit assumptions, actively verifies consequential claims with executable checks, and retracts conclusions when their premises fail. It does not change model weights, and it does not treat a model's assertion as ground truth.
 
-The first vertical slice is a computational science task: an agent tests the polynomial `f(n) = n² + n + 41`, overgeneralizes from a partial range, and recovers after an exhaustive scan finds `f(40) = 1681 = 41 × 41`.
+PARADOX includes an internal regression demonstration for the polynomial `f(n) = n² + n + 41`, three additional deterministic computational research tasks, a narrow software-test transfer task, and an adapter for the official ScienceWorld environment. The statistical, optimization, and measurement tasks use predefined operations rather than arbitrary model-generated code.
 
 ```text
 model/provider ──▶ bounded runner ──▶ domain tools
@@ -42,7 +42,7 @@ model/provider ──▶ bounded runner ──▶ domain tools
 
 Requirements:
 
-- Go 1.26+
+- Go 1.26.10 or later
 - Python 3.10+ for the science experiment tool
 - Optional: `prlimit` (Linux `util-linux`) for additional outer subprocess limits
 
@@ -50,6 +50,14 @@ Run the complete scientific slice with the deterministic mock provider:
 
 ```bash
 go run ./cmd/paradox run --provider mock --mode paradox
+```
+
+Run the other reproducible internal research tasks:
+
+```bash
+go run ./cmd/paradox run --provider mock --task-id science-permutation-test-v1
+go run ./cmd/paradox run --provider mock --task-id science-optimization-v1
+go run ./cmd/paradox run --provider mock --task-id science-measurement-revision-v1
 ```
 
 Inspect the persisted trace and evidence graph:
@@ -62,8 +70,26 @@ go run ./cmd/paradox evidence <run-id>
 Run a matched comparison:
 
 ```bash
-go run ./cmd/paradox eval --trials 3
+go run ./cmd/paradox eval --config eval/configs/internal-science-v0.2.json
 ```
+
+The JSON config pins the task IDs, model/provider, modes, verification policy, retry behavior, and resource limits; run reports resolve the Git commit and evaluator version. Its run settings take precedence over matching CLI flags; output paths and report formatting remain CLI options. API keys are never stored in configuration files.
+
+Check offline readiness and serialize a provider request locally without a network call:
+
+```bash
+go run ./cmd/paradox doctor --provider mock --dry-run --json
+```
+
+The official ScienceWorld environment can be selected for matched evaluation after installing its official Python package and Java requirements:
+
+```bash
+go run ./cmd/paradox eval --suite scienceworld --benchmark-task boil \
+  --variation 0 --step-limit 100 --provider meta --model muse-spark-1.3 \
+  --modes baseline,evidence,paradox --trials 1
+```
+
+PARADOX records the official environment's score and reward. Run `paradox doctor` first; offline checks do not install dependencies or contact providers.
 
 Start the local dashboard and API:
 
@@ -76,7 +102,7 @@ All run artifacts default to `.paradox/runs`; evaluation reports default to `.pa
 
 ## The science vertical slice
 
-Task `science-primality-v1` asks whether `f(n) = n² + n + 41` is prime for every integer `n` in `[0,100]`.
+Task `science-primality-v1` is an internal regression demonstration. It asks whether `f(n) = n² + n + 41` is prime for every integer `n` in `[0,100]`.
 
 1. The agent runs a primality scan over `[0,39]`. All 40 values are prime.
 2. It submits a universal claim over `[0,100]` and records an explicit assumption: the tested range is representative of the claimed range.
@@ -86,6 +112,8 @@ Task `science-primality-v1` asks whether `f(n) = n² + n + 41` is prime for ever
 6. The runner sends a replan message. The agent revises to a bounded claim over `[0,39]` and a counterexample claim about `n=40`.
 
 `baseline` and `evidence` modes do not run the falsification plan, so the universal claim remains active and the domain evaluation fails. This is measured in the evaluation report rather than asserted by the UI.
+
+Other internal development tasks run an exact permutation test, exhaustively optimize an integer objective, and test measurement stability using an independent replication batch. Reference values are evaluator-side and are not sent to the model. `domain/software` has a narrow integration test that records a failing regression test, changes the proposed candidate, then verifies the passing result. These fixtures are not held-out benchmarks or evidence of model improvement.
 
 ## Evidence model
 
@@ -110,13 +138,13 @@ Claims record an epistemic status (`hypothesis`, `supported_hypothesis`) and ver
 
 ## Operating modes
 
-| Mode | Dependencies | Consistency checks | Active falsification | Automatic retraction/replan |
+| Mode | Dependency records | Consistency checks | Active falsification | Automatic retraction/replan |
 |---|---:|---:|---:|---:|
-| `baseline` | no | no | no | no |
+| `baseline` | evaluation trace only | no | no | no |
 | `evidence` | yes | yes | no | only for explicit contradictions found during consistency checks |
 | `paradox` | yes | yes | yes | yes, when executable verification contradicts a premise |
 
-Live verification is generated only in `paradox` mode and only for assumptions that the domain adapter considers testable and consequential.
+Live verification is generated only in `paradox` mode and only for assumptions that the domain adapter considers testable and consequential. All modes use the same task, model, and tools; each receives mode-specific instructions matching the mechanism being evaluated.
 
 ## Providers
 
@@ -146,6 +174,8 @@ go run ./cmd/paradox run --provider openrouter --model <model-id>
 
 The research loop requires structured tool calls. Check the live model catalog before selecting an OpenRouter model; the listing reflects each model's advertised tool, reasoning, structured-output, and context capabilities.
 
+OpenRouter capabilities vary by model. Check the selected model's `supported_parameters` for `tools`, `reasoning`, and `response_format`, then pass the matching `--tool-calls-supported`, `--reasoning-supported`, or `--structured-output-supported` confirmation flags. Without confirmation, requests that require those capabilities fail locally. Offline `doctor` cannot verify the current remote catalog.
+
 The Meta adapter uses the Responses API and chains `previous_response_id` across tool turns. The opaque provider state stays in the active run and is reset between runs; PARADOX does not expose private model reasoning.
 
 Cost accounting is only marked available when the provider reports cost or when per-million-token prices are configured. Missing cost is never estimated.
@@ -157,6 +187,7 @@ paradox run       Execute a bounded agent run
 paradox trace     Inspect a persisted execution trace
 paradox evidence  Inspect the evidence graph and retractions
 paradox eval      Run matched baseline/evidence/paradox comparisons
+paradox doctor    Check offline readiness and serialize provider requests locally
 paradox serve     Start the local API and dashboard
 paradox models    List documented or live provider models
 paradox version   Print build identity
@@ -228,7 +259,7 @@ The dashboard reads real status, events, claims, contradictions, retractions, ve
 
 - The HTTP server is local-first. Non-loopback bindings require an API key, and security headers are set on every response.
 - Provider keys are read from server environment variables; the browser never receives them.
-- The science tool writes a fixed script to a temporary directory, passes validated JSON arguments, evaluates an allowlisted integer-expression syntax, uses `python3 -I`, and applies CPU, memory, file-descriptor, run-time, and output limits. `prlimit` adds outer process limits when installed.
+- The primality regression writes a fixed script to a temporary directory, passes validated JSON arguments, evaluates a restricted integer-expression syntax, uses `python3 -I`, and applies CPU, memory, file-size, file-descriptor, run-time, and output limits. Other internal science tasks use predefined Go operations. ScienceWorld uses a fixed bridge to its official Python/Java package; model-provided actions are sent to the environment parser, not executed as code. `prlimit` adds outer process limits where available.
 - This is **not** a hardened multi-tenant sandbox. Run untrusted models in an isolated container or VM with network and filesystem controls appropriate to your threat model.
 - The symbolic kernel tracks justification and invalidation; it does not prove scientific truth. It records what the tools observed and what the model inferred.
 - API keys can be supplied via query parameter only for SSE clients that cannot set headers. Prefer loopback or a reverse proxy that terminates TLS and authentication.
@@ -243,6 +274,8 @@ harness/           bounded loop, provider contracts, tools, events, budgets
 evidence/          typed evidence layer over the symbolic kernel
 core/              preserved truth-maintenance kernel and deterministic tests
 domain/science/    science adapter, fixed Python experiment, deterministic mock
+domain/software/   narrow test-driven evidence-revision transfer fixture
+benchmark/scienceworld/ official ScienceWorld process bridge, adapter, and smoke test
 provider/          Meta, OpenRouter, and OpenAI-compatible adapters
 eval/              matched comparison runner and reports
 runstore/          filesystem JSONL run persistence
@@ -260,10 +293,11 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the runtime and evidence se
 gofmt -s -w .
 go vet ./...
 go test ./... -count=1 -timeout 120s
+go test -race ./... -count=1 -timeout 180s
 go build ./cmd/paradox
 ```
 
-The deterministic suite uses the mock provider and the real science subprocess. It verifies that `paradox` succeeds after a contradiction and retraction while `baseline` and `evidence` fail the same task.
+The deterministic suite exercises mock-provider workflows and real local tools, evidence invalidation, provider HTTP protocol fixtures, budgets, secret redaction, and the software transfer task. It does not perform live inference. ScienceWorld's smoke test runs only when its official package and Java runtime are present; otherwise it skips with the dependency blocker.
 
 ## License and provenance
 
