@@ -45,8 +45,8 @@ func (r *captureRecorder) Record(event harness.Event) error {
 	r.events = append(r.events, event)
 	return nil
 }
-func (r *captureRecorder) SaveResult(*harness.RunResult) error          { return nil }
-func (r *captureRecorder) SaveEvidence(evidence.Snapshot) error        { return nil }
+func (r *captureRecorder) SaveResult(*harness.RunResult) error  { return nil }
+func (r *captureRecorder) SaveEvidence(evidence.Snapshot) error { return nil }
 func (r *captureRecorder) eventTypes() map[string]int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -166,6 +166,56 @@ func TestToolCallBudgetStopsRunAndCannotBeSuccessful(t *testing.T) {
 	}
 	if result.Success {
 		t.Fatal("a budget-exhausted run must not be marked successful")
+	}
+}
+
+func TestInferenceBudgetRejectsOverBudgetResponseBeforeToolExecution(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		usage harness.Usage
+		set   func(*harness.Budget)
+		want  string
+	}{
+		{
+			name: "tokens", usage: harness.Usage{TotalTokens: 101, CostUSD: 0.001, CostAvailable: true},
+			set: func(b *harness.Budget) { b.MaxTokens = 100 }, want: "token budget exceeded",
+		},
+		{
+			name: "cost", usage: harness.Usage{TotalTokens: 10, CostUSD: 0.02, CostAvailable: true},
+			set: func(b *harness.Budget) { b.MaxCostUSD = 0.01 }, want: "cost budget exceeded",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			executed := 0
+			provider := harness.NewMock("test", "test-model", func(context.Context, *harness.ModelRequest) (*harness.ModelResponse, error) {
+				return &harness.ModelResponse{
+					ToolCalls: []harness.ToolCall{{ID: "call-echo", Name: "echo", Arguments: `{}`}},
+					Usage:     tc.usage,
+				}, nil
+			})
+			echo := harness.Tool{
+				Name: "echo", Description: "counts executions",
+				Handler: func(context.Context, *harness.ToolContext, json.RawMessage) (*harness.ToolResult, error) {
+					executed++
+					return &harness.ToolResult{Content: "ok"}, nil
+				},
+			}
+			budget := testBudget()
+			tc.set(&budget)
+			recorder := &captureRecorder{}
+			result := runTestHarness(t, context.Background(), provider, &stubDomain{
+				tools: []harness.Tool{echo}, evaluation: harness.Evaluation{Success: true, Score: 1},
+			}, budget, recorder)
+			if result.Success || !strings.Contains(result.Error, tc.want) {
+				t.Fatalf("expected failed run with %q, got %+v", tc.want, result)
+			}
+			if executed != 0 {
+				t.Fatalf("over-budget tool call executed %d times", executed)
+			}
+			if recorder.eventTypes()["budget_exhausted"] != 1 {
+				t.Fatalf("expected budget event: %+v", recorder.eventTypes())
+			}
+		})
 	}
 }
 

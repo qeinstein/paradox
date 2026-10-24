@@ -145,6 +145,9 @@ func runExperiment(ctx context.Context, tc *harness.ToolContext, raw json.RawMes
 }
 
 func executePrimalityScan(ctx context.Context, tc *harness.ToolContext, args scanArgs) (*scanResult, evidence.ArtifactRef, error) {
+	if tc == nil || strings.TrimSpace(tc.WorkDir) == "" || strings.TrimSpace(tc.ArtifactsDir) == "" {
+		return nil, evidence.ArtifactRef{}, errors.New("experiment requires a run work directory and artifacts directory")
+	}
 	dir, err := os.MkdirTemp(tc.WorkDir, "science-scan-")
 	if err != nil {
 		return nil, evidence.ArtifactRef{}, err
@@ -189,12 +192,21 @@ func executePrimalityScan(ctx context.Context, tc *harness.ToolContext, args sca
 		}
 		return nil, evidence.ArtifactRef{}, fmt.Errorf("experiment subprocess failed: %s", message)
 	}
+	if stdout.truncated {
+		return nil, evidence.ArtifactRef{}, errors.New("experiment output exceeded the 1 MiB limit")
+	}
 	var result scanResult
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
 		return nil, evidence.ArtifactRef{}, fmt.Errorf("could not parse experiment output: %w", err)
 	}
 	if result.Tested != args.End-args.Start+1 {
 		return nil, evidence.ArtifactRef{}, fmt.Errorf("experiment returned %d tested values, expected %d", result.Tested, args.End-args.Start+1)
+	}
+	if result.Experiment != args.Experiment || result.Expression != args.Expression || result.Start != args.Start || result.End != args.End {
+		return nil, evidence.ArtifactRef{}, errors.New("experiment output did not match the requested experiment")
+	}
+	if result.PrimeCount < 0 || result.CompositeCount < 0 || result.PrimeCount+result.CompositeCount != result.Tested {
+		return nil, evidence.ArtifactRef{}, errors.New("experiment returned inconsistent primality counts")
 	}
 
 	artifactData, err := json.MarshalIndent(result, "", "  ")
@@ -203,17 +215,45 @@ func executePrimalityScan(ctx context.Context, tc *harness.ToolContext, args sca
 	}
 	sum := sha256.Sum256(artifactData)
 	hash := hex.EncodeToString(sum[:])
+	result.ArtifactSHA256 = hash
 	name := fmt.Sprintf("%s-%s.json", "primality", hash[:16])
-	if tc.ArtifactsDir != "" {
-		if err := os.MkdirAll(tc.ArtifactsDir, 0o755); err == nil {
-			_ = os.WriteFile(filepath.Join(tc.ArtifactsDir, name), artifactData, 0o644)
-		}
+	if err := os.MkdirAll(tc.ArtifactsDir, 0o700); err != nil {
+		return nil, evidence.ArtifactRef{}, fmt.Errorf("create experiment artifacts directory: %w", err)
+	}
+	artifactPath := filepath.Join(tc.ArtifactsDir, name)
+	if err := writeArtifact(artifactPath, artifactData); err != nil {
+		return nil, evidence.ArtifactRef{}, fmt.Errorf("persist experiment artifact: %w", err)
 	}
 	artifact := evidence.ArtifactRef{
 		Name: name, SHA256: hash, MediaType: "application/json",
-		Path: filepath.Join(tc.ArtifactsDir, name),
+		Path: artifactPath,
 	}
 	return &result, artifact, nil
+}
+
+func writeArtifact(path string, data []byte) error {
+	temporary, err := os.CreateTemp(filepath.Dir(path), ".artifact-*.tmp")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err := temporary.Chmod(0o600); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if _, err := temporary.Write(data); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	return os.Rename(temporaryPath, path)
 }
 
 type limitedBuffer struct {
@@ -246,12 +286,29 @@ func normalizeExpression(expression string) string {
 
 // pythonScanScript is fixed and receives only validated JSON arguments. The
 // agent cannot supply arbitrary Python source.
-const pythonScanScript = `import json, sys, hashlib
+const pythonScanScript = `import ast, json, sys
+
+import resource
+
+def set_limit(name, requested):
+    _resource = getattr(resource, name, None)
+    if _resource is None:
+        return
+    _soft, _hard = resource.getrlimit(_resource)
+    if _soft != resource.RLIM_INFINITY:
+        requested = min(requested, _soft)
+    if _hard != resource.RLIM_INFINITY:
+        requested = min(requested, _hard)
+    resource.setrlimit(_resource, (requested, requested))
+
+set_limit("RLIMIT_CPU", 10)
+for _name, _limit in (("RLIMIT_AS", 512 * 1024 * 1024), ("RLIMIT_NOFILE", 128), ("RLIMIT_FSIZE", 1024 * 1024)):
+    set_limit(_name, _limit)
 
 args = json.loads(sys.argv[1])
 start = int(args["start"])
 end = int(args["end"])
-expr = args["expression"].replace("^", "**")
+tree = ast.parse(args["expression"].replace("^", "**"), mode="eval")
 
 def is_prime(value):
     if value < 2:
@@ -275,8 +332,44 @@ def first_factors(value):
         factor += 1
     return [value]
 
+def polynomial_value(node, n):
+    if isinstance(node, ast.Expression):
+        return polynomial_value(node.body, n)
+    if isinstance(node, ast.Constant) and type(node.value) is int:
+        value = node.value
+    elif isinstance(node, ast.Name) and node.id == "n":
+        value = n
+    elif isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        value = polynomial_value(node.operand, n)
+        if isinstance(node.op, ast.USub):
+            value = -value
+    elif isinstance(node, ast.BinOp):
+        left = polynomial_value(node.left, n)
+        if isinstance(node.op, ast.Pow):
+            if not isinstance(node.right, ast.Constant) or type(node.right.value) is not int:
+                raise ValueError("exponents must be integer literals")
+            exponent = node.right.value
+            if exponent < 0 or exponent > 12:
+                raise ValueError("exponents must be between 0 and 12")
+            value = left ** exponent
+        else:
+            right = polynomial_value(node.right, n)
+            if isinstance(node.op, ast.Add):
+                value = left + right
+            elif isinstance(node.op, ast.Sub):
+                value = left - right
+            elif isinstance(node.op, ast.Mult):
+                value = left * right
+            else:
+                raise ValueError("only integer polynomial operations are supported")
+    else:
+        raise ValueError("expression contains an unsupported syntax node")
+    if abs(value) > 10**12:
+        raise ValueError("polynomial intermediate exceeds the experiment's safe bound")
+    return value
+
 def polynomial(n):
-    return eval(expr, {"__builtins__": {}}, {"n": n})
+    return polynomial_value(tree, n)
 
 primes = 0
 composites = 0
@@ -304,6 +397,5 @@ result = {
     "composite_count": composites,
     "counterexample": counterexample,
 }
-result["artifact_sha256"] = hashlib.sha256(json.dumps(result, sort_keys=True).encode()).hexdigest()
 print(json.dumps(result))
 `

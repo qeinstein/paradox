@@ -141,6 +141,10 @@ func (r *Runner) run(ctx context.Context) *RunResult {
 			runErr = errors.New("provider did not report inference cost and RequireCost is set")
 			break
 		}
+		if err := r.checkInferenceBudget(); err != nil {
+			runErr = err
+			break
+		}
 		if len(response.ToolCalls) == 0 {
 			r.finalText = strings.TrimSpace(response.Content)
 			if r.finalText == "" {
@@ -160,7 +164,7 @@ func (r *Runner) run(ctx context.Context) *RunResult {
 			"tool_calls": toolCallSummary(response.ToolCalls),
 		})
 
-		for index, call := range response.ToolCalls {
+		for _, call := range response.ToolCalls {
 			if r.finishRequested {
 				r.messages = append(r.messages, Message{
 					Role: RoleTool, ToolCallID: call.ID, Name: call.Name,
@@ -198,7 +202,6 @@ func (r *Runner) run(ctx context.Context) *RunResult {
 				}
 				r.invalidations = nil
 			}
-			_ = index
 		}
 		if runErr != nil {
 			break
@@ -255,6 +258,25 @@ func (r *Runner) run(ctx context.Context) *RunResult {
 		_ = err
 	}
 	return result
+}
+
+// checkInferenceBudget runs after each provider response. Providers can report
+// prompt usage that could not be known exactly before the request, so reject an
+// over-budget response before accepting its answer or executing its tools.
+func (r *Runner) checkInferenceBudget() error {
+	if r.usage.TotalTokens > r.cfg.Budget.MaxTokens {
+		r.emit("budget_exhausted", map[string]any{
+			"kind": "tokens", "used": r.usage.TotalTokens, "limit": r.cfg.Budget.MaxTokens,
+		})
+		return fmt.Errorf("token budget exceeded (%d/%d)", r.usage.TotalTokens, r.cfg.Budget.MaxTokens)
+	}
+	if r.usage.CostAvailable && r.usage.CostUSD > r.cfg.Budget.MaxCostUSD {
+		r.emit("budget_exhausted", map[string]any{
+			"kind": "cost", "used": r.usage.CostUSD, "limit": r.cfg.Budget.MaxCostUSD,
+		})
+		return fmt.Errorf("cost budget exceeded ($%.4f/$%.4f)", r.usage.CostUSD, r.cfg.Budget.MaxCostUSD)
+	}
+	return nil
 }
 
 func (r *Runner) complete(ctx context.Context) (*ModelResponse, error) {

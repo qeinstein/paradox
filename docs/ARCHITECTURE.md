@@ -140,6 +140,8 @@ The run manager holds in-memory cancellation functions and terminal status. On s
 
 Provider keys are read from environment variables only. The browser receives model IDs, never credentials.
 
+The Meta adapter currently uses Chat Completions and resends the visible transcript on every turn. It does not preserve Meta's Responses API reasoning state; see the provider documentation and current implementation scope before comparing long-horizon reasoning behavior across providers.
+
 ## Failure behavior
 
 - Provider errors are retried up to `MaxRetries` with bounded backoff, then fail the run.
@@ -151,6 +153,6 @@ Provider keys are read from environment variables only. The browser receives mod
 ## Deliberate limits
 
 - The evidence kernel is monotonic in its handling of explicit observations; contradiction is expressed by retracting a guard or premise, not by mutating observations.
-- The science subprocess limits resources but is not a security sandbox.
+- The science subprocess applies CPU, memory, file-descriptor, wall-clock, and output bounds and accepts only a fixed expression grammar. It is still not a hardened security sandbox.
 - The mock provider exists to test the harness and is not a model-quality benchmark.
 - The dashboard displays persisted data; it does not infer missing values.

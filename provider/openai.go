@@ -143,6 +143,11 @@ type chatRequest struct {
 	ReasoningEffort     string           `json:"reasoning_effort,omitempty"`
 	Reasoning           *reasoningConfig `json:"reasoning,omitempty"`
 	ResponseFormat      *responseFormat  `json:"response_format,omitempty"`
+	Usage               *usageOptions    `json:"usage,omitempty"`
+}
+
+type usageOptions struct {
+	Include bool `json:"include"`
 }
 
 type reasoningConfig struct {
@@ -246,6 +251,11 @@ func (p *OpenAIProvider) buildRequest(req *harness.ModelRequest) ([]byte, error)
 		}
 		request.ResponseFormat = format
 	}
+	if p.cfg.Name == "openrouter" {
+		// OpenRouter exposes per-request cost in the usage object when usage
+		// reporting is requested. This is needed for PARADOX cost budgets.
+		request.Usage = &usageOptions{Include: true}
+	}
 	return json.Marshal(request)
 }
 
@@ -346,7 +356,10 @@ func (p *OpenAIProvider) ListModels(ctx context.Context) ([]harness.ModelInfo, e
 	}
 	var parsed struct {
 		Data []struct {
-			ID string `json:"id"`
+			ID                  string   `json:"id"`
+			Name                string   `json:"name"`
+			ContextLength       int      `json:"context_length"`
+			SupportedParameters []string `json:"supported_parameters"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(body, &parsed); err != nil {
@@ -354,12 +367,37 @@ func (p *OpenAIProvider) ListModels(ctx context.Context) ([]harness.ModelInfo, e
 	}
 	models := make([]harness.ModelInfo, 0, len(parsed.Data))
 	for _, model := range parsed.Data {
+		capabilities := p.cfg.Capabilities
+		if p.cfg.Name == "openrouter" {
+			// OpenRouter's catalog is model-specific. Do not advertise tool or
+			// structured-output support just because the API accepts those fields.
+			capabilities = harness.Capabilities{
+				ToolCalls:        supports(model.SupportedParameters, "tools"),
+				StructuredOutput: supports(model.SupportedParameters, "response_format"),
+				Reasoning:        supports(model.SupportedParameters, "reasoning") || supports(model.SupportedParameters, "reasoning_effort"),
+				Streaming:        p.cfg.Capabilities.Streaming,
+				MaxContextTokens: model.ContextLength,
+			}
+		}
+		displayName := model.Name
+		if displayName == "" {
+			displayName = model.ID
+		}
 		models = append(models, harness.ModelInfo{
-			ID: model.ID, Provider: p.cfg.Name, DisplayName: model.ID,
-			Capabilities: p.cfg.Capabilities,
+			ID: model.ID, Provider: p.cfg.Name, DisplayName: displayName,
+			Capabilities: capabilities,
 		})
 	}
 	return models, nil
+}
+
+func supports(parameters []string, wanted string) bool {
+	for _, parameter := range parameters {
+		if parameter == wanted {
+			return true
+		}
+	}
+	return false
 }
 
 func truncateString(value string, limit int) string {

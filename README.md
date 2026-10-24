@@ -44,7 +44,7 @@ Requirements:
 
 - Go 1.26+
 - Python 3.10+ for the science experiment tool
-- Optional: `prlimit` (Linux `util-linux`) for subprocess memory/CPU/file-descriptor limits
+- Optional: `prlimit` (Linux `util-linux`) for additional outer subprocess limits
 
 Run the complete scientific slice with the deterministic mock provider:
 
@@ -126,7 +126,7 @@ PARADOX speaks an OpenAI-compatible chat-completions surface and keeps provider 
 |---|---|---|
 | `mock` | Deterministic science tests, evaluation harness, UI demos | none |
 | `meta` | Meta Model API, first-class Muse models | `META_API_KEY` (or `MODEL_API_KEY`) |
-| `openrouter` | Any current OpenRouter model; explicit model ID required | `OPENROUTER_API_KEY` |
+| `openrouter` | Current OpenRouter models with model-specific capabilities; explicit model ID required | `OPENROUTER_API_KEY` |
 | `openai-compatible` | Self-hosted or other compatible endpoints | `MODEL_API_KEY` / `OPENAI_API_KEY`, `PARADOX_BASE_URL` |
 
 Meta adapter defaults to `muse-spark-1.3` and uses `https://api.meta.ai/v1`. The documented catalog is available with:
@@ -143,6 +143,10 @@ export OPENROUTER_API_KEY=...
 go run ./cmd/paradox models --provider openrouter
 go run ./cmd/paradox run --provider openrouter --model <model-id>
 ```
+
+The research loop requires structured tool calls. Check the live model catalog before selecting an OpenRouter model; the listing reflects each model's advertised tool, reasoning, structured-output, and context capabilities.
+
+The Meta adapter currently uses the stateless Chat Completions endpoint and replays the visible conversation on each turn. Meta documents its Responses API as the option for carrying reasoning across agent turns; that stateful adapter is not implemented yet.
 
 Cost accounting is only marked available when the provider reports cost or when per-million-token prices are configured. Missing cost is never estimated.
 
@@ -224,7 +228,7 @@ The dashboard reads real status, events, claims, contradictions, retractions, ve
 
 - The HTTP server is local-first. Non-loopback bindings require an API key, and security headers are set on every response.
 - Provider keys are read from server environment variables; the browser never receives them.
-- The science tool writes a fixed script to a temporary directory, passes validated JSON arguments, uses `python3 -I`, and applies `prlimit` limits when available.
+- The science tool writes a fixed script to a temporary directory, passes validated JSON arguments, evaluates an allowlisted integer-expression syntax, uses `python3 -I`, and applies CPU, memory, file-descriptor, run-time, and output limits. `prlimit` adds outer process limits when installed.
 - This is **not** a hardened multi-tenant sandbox. Run untrusted models in an isolated container or VM with network and filesystem controls appropriate to your threat model.
 - The symbolic kernel tracks justification and invalidation; it does not prove scientific truth. It records what the tools observed and what the model inferred.
 - API keys can be supplied via query parameter only for SSE clients that cannot set headers. Prefer loopback or a reverse proxy that terminates TLS and authentication.

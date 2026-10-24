@@ -74,6 +74,9 @@ func (b Budget) normalized() Budget {
 	if b.MaxTokens <= 0 {
 		b.MaxTokens = defaults.MaxTokens
 	}
+	if b.MaxCostUSD <= 0 {
+		b.MaxCostUSD = defaults.MaxCostUSD
+	}
 	if b.TimeoutMS <= 0 {
 		b.TimeoutMS = defaults.TimeoutMS
 	}

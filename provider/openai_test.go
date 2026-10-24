@@ -91,6 +91,10 @@ func TestOpenRouterUsesReasoningObject(t *testing.T) {
 	if _, exists := received["reasoning_effort"]; exists {
 		t.Fatalf("unexpected top-level reasoning_effort: %+v", received)
 	}
+	usage, _ := received["usage"].(map[string]any)
+	if usage["include"] != true {
+		t.Fatalf("OpenRouter usage reporting was not requested: %+v", received)
+	}
 }
 
 func TestConfiguredPricesProvideCostAccounting(t *testing.T) {
@@ -143,5 +147,39 @@ func TestListModels(t *testing.T) {
 	}
 	if len(models) != 2 || models[0].ID != "model-a" {
 		t.Fatalf("unexpected models: %+v", models)
+	}
+}
+
+func TestOpenRouterModelCatalogUsesReportedCapabilities(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[
+			{"id":"vendor/tool-model","name":"Tool Model","context_length":128000,"supported_parameters":["tools","reasoning","response_format"]},
+			{"id":"vendor/text-model","name":"Text Model","context_length":32000,"supported_parameters":["temperature"]}
+		]}`))
+	}))
+	defer server.Close()
+	client := provider.NewOpenAICompatible(provider.OpenAIConfig{
+		Name: "openrouter", BaseURL: server.URL, Capabilities: harness.Capabilities{Streaming: true},
+	})
+	models, err := client.ListModels(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 2 {
+		t.Fatalf("expected two models, got %+v", models)
+	}
+	first := models[0]
+	if first.DisplayName != "Tool Model" || first.Capabilities.MaxContextTokens != 128000 {
+		t.Fatalf("model metadata missing: %+v", first)
+	}
+	if !first.Capabilities.ToolCalls || !first.Capabilities.StructuredOutput || !first.Capabilities.Reasoning {
+		t.Fatalf("reported capabilities missing: %+v", first.Capabilities)
+	}
+	second := models[1]
+	if second.Capabilities.ToolCalls || second.Capabilities.StructuredOutput || second.Capabilities.Reasoning {
+		t.Fatalf("unsupported capabilities were advertised: %+v", second.Capabilities)
+	}
+	if !second.Capabilities.Streaming {
+		t.Fatal("provider streaming capability should be preserved")
 	}
 }
